@@ -1,0 +1,29 @@
+output "pubsub_topic_id" {
+  description = "The fully qualified ID of the Pub/Sub topic."
+  value       = google_pubsub_topic.scc_high_alerts_topic.id
+}
+
+output "pubsub_topic_name" {
+  description = "The name of the Pub/Sub topic."
+  value       = google_pubsub_topic.scc_high_alerts_topic.name
+}
+
+output "pubsub_subscription_id" {
+  description = "The fully qualified ID of the pull subscription."
+  value       = google_pubsub_subscription.scc_high_alerts_sub.id
+}
+
+output "pubsub_subscription_name" {
+  description = "The name of the pull subscription."
+  value       = google_pubsub_subscription.scc_high_alerts_sub.name
+}
+
+output "scc_notification_config_id" {
+  description = "The resource ID of the SCC continuous export notification config."
+  value       = google_scc_notification_config.scc_notification_config.id
+}
+
+output "scc_service_account" {
+  description = "The native Security Command Center service account used to publish alerts."
+  value       = google_scc_notification_config.scc_notification_config.service_account
+}

@@ -1,0 +1,24 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!terraform.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Local binaries and tooling
+bin/
+
+# Temporary / Log files
+*.log

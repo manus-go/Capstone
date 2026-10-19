@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 860" width="1600" height="860">
+<defs>
+  <filter id="barShadow" x="-2%" y="-5%" width="104%" height="116%">
+    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#021237" flood-opacity="0.12"/>
+  </filter>
+</defs>
+<rect x="0" y="0" width="1600" height="860" fill="#FFFFFF"/>
+<text x="800.0" y="72" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="44" font-weight="bold" fill="#021237">Timeline Design</text>
+<text x="800.0" y="110" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="normal" fill="#4A5568">CloudGuard Agent — Capstone Project &amp; Skills Showcase Overview</text>
+<rect x="100" y="145" width="698.0" height="48" fill="#004B3C"/>
+<text x="449.0" y="176" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="#FFFFFF">October</text>
+<rect x="801.0" y="145" width="699.0" height="48" fill="#004B3C"/>
+<text x="1150.5" y="176" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="bold" fill="#FFFFFF">November</text>
+<rect x="100.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="186.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 1</text>
+<rect x="100.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="275.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="361.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 2</text>
+<rect x="275.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="450.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="536.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 3</text>
+<rect x="450.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="625.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="711.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 4</text>
+<rect x="625.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="800.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="886.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 5</text>
+<rect x="800.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="975.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="1061.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 6</text>
+<rect x="975.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="1150.0" y="199" width="172.0" height="44" fill="#036853"/>
+<text x="1236.0" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 7</text>
+<rect x="1150.0" y="249" width="172.0" height="536" fill="#EEF1F2"/>
+<rect x="1325.0" y="199" width="175.0" height="44" fill="#036853"/>
+<text x="1412.5" y="228" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="bold" fill="#FFFFFF">WEEK 8</text>
+<rect x="1325.0" y="249" width="175.0" height="536" fill="#EEF1F2"/>
+<polygon points="48,476.0 66,502.0 48,528.0 30,502.0" fill="#4285F4"/>
+<text x="48" y="550.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#021237">Project</text>
+<text x="48" y="567.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#021237">start</text>
+<polygon points="1552,476.0 1570,502.0 1552,528.0 1534,502.0" fill="#4285F4"/>
+<text x="1552" y="550.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#021237">Project</text>
+<text x="1552" y="567.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#021237">end</text>
+<rect x="100.0" y="276.8" width="402.5" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="301.2" y="299.4" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Pre-Project Research &amp; GCP Scope Definition</text>
+<text x="301.2" y="320.4" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">(SecOps Challenges &amp; Remediation Workflows)</text>
+<rect x="170.0" y="347.7" width="437.5" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="388.8" y="370.3" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Architecture Exploration &amp; Tooling Selection</text>
+<text x="388.8" y="391.3" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">(GitOps Workflow vs. Direct Execution Analysis)</text>
+<rect x="275.0" y="418.5" width="455.0" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="502.5" y="441.1" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Solution Architecture &amp; Data Store Design</text>
+<text x="502.5" y="462.1" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">(Real-Time State vs. Historical Audit Ledger)</text>
+<rect x="415.0" y="489.4" width="770.0" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="800.0" y="512.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">CloudGuard Agent &amp; Chatbot Prototype Development</text>
+<text x="800.0" y="533.0" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">(Automated Triage, Deduplication &amp; 1-Click Fix)</text>
+<rect x="800.0" y="560.2" width="525.0" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="1062.5" y="582.9" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Prototype Testing &amp; Validation Across</text>
+<text x="1062.5" y="603.9" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Simulated Cloud Misconfigurations</text>
+<rect x="870.0" y="631.1" width="490.0" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="1115.0" y="653.7" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Performance &amp; Remediation Metrics Evaluation</text>
+<text x="1115.0" y="674.7" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">(MTTR Improvement &amp; Alert Fatigue Reduction)</text>
+<rect x="1062.5" y="701.9" width="437.5" height="55.3" fill="#006AB0" stroke="#1B81C4" stroke-width="1" filter="url(#barShadow)"/>
+<text x="1281.2" y="724.6" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">Final Capstone Presentation, Live Demo</text>
+<text x="1281.2" y="745.6" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14.5" font-weight="normal" fill="#FFFFFF">&amp; Project Showcase</text>
+<line x1="1468.5" y1="243" x2="1468.5" y2="803" stroke="#980000" stroke-width="2.5" stroke-dasharray="8,6"/>
+<text x="1468.5" y="827" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="normal" fill="#980000">We are here</text>
+</svg>
