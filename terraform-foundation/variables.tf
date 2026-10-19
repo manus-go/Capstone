@@ -33,3 +33,21 @@ variable "scc_notification_config_id" {
   type        = string
   default     = "scc-high-alerts-config"
 }
+
+variable "bigquery_dataset_id" {
+  description = "The ID of the BigQuery dataset used as the SecOps telemetry data lake."
+  type        = string
+  default     = "secops_lake"
+}
+
+variable "bigquery_table_id" {
+  description = "The ID of the BigQuery table storing raw SCC alert payloads."
+  type        = string
+  default     = "scc_findings_raw"
+}
+
+variable "bigquery_subscription_name" {
+  description = "The name of the Pub/Sub BigQuery subscription for automatic ingestion."
+  type        = string
+  default     = "scc-high-alerts-bigquery-sub"
+}
