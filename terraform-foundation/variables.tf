@@ -58,3 +58,22 @@ variable "cloud_function_name" {
   default     = "scc-alert-router"
 }
 
+variable "google_chat_webhook_url" {
+  description = "The Incoming Webhook URL for the Google Chat space to deliver SecOps alerts and remediation plans."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "vertex_ai_location" {
+  description = "The GCP region for Vertex AI Gemini model calls."
+  type        = string
+  default     = "europe-west2"
+}
+
+variable "vertex_ai_model" {
+  description = "The Gemini model name on Vertex AI to generate security summaries and Terraform remediation."
+  type        = string
+  default     = "gemini-2.5-flash"
+}
+

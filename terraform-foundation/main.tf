@@ -89,6 +89,13 @@ resource "google_project_service" "eventarc" {
   disable_on_destroy         = false
 }
 
+resource "google_project_service" "aiplatform" {
+  project                    = var.project_id
+  service                    = "aiplatform.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
 locals {
   is_org_level = var.organization_id != null && var.organization_id != ""
   clean_org_id = replace(var.organization_id, "organizations/", "")
@@ -394,6 +401,18 @@ resource "google_project_iam_member" "alert_router_run_invoker" {
   member  = "serviceAccount:${google_service_account.alert_router.email}"
 }
 
+resource "google_project_iam_member" "alert_router_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "alert_router_service_usage_consumer" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageConsumer"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
 resource "google_project_iam_member" "pubsub_token_creator" {
   project = var.project_id
   role    = "roles/iam.serviceAccountTokenCreator"
@@ -407,7 +426,7 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
   name        = var.cloud_function_name
   location    = var.region
   project     = var.project_id
-  description = "Evaluates SCC alerts from Pub/Sub against user preferences and stores them in Firestore."
+  description = "Evaluates SCC alerts from Pub/Sub, uses Vertex AI for Terraform fix recommendations, and posts to Google Chat."
 
   build_config {
     runtime     = "python311"
@@ -423,11 +442,14 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
   service_config {
     max_instance_count    = 5
     min_instance_count    = 0
-    available_memory      = "256M"
-    timeout_seconds       = 60
+    available_memory      = "512M"
+    timeout_seconds       = 120
     service_account_email = google_service_account.alert_router.email
     environment_variables = {
-      PROJECT_ID = var.project_id
+      PROJECT_ID              = var.project_id
+      VERTEX_AI_LOCATION      = var.vertex_ai_location
+      VERTEX_AI_MODEL         = var.vertex_ai_model
+      GOOGLE_CHAT_WEBHOOK_URL = var.google_chat_webhook_url
     }
   }
 
