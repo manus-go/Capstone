@@ -20,10 +20,10 @@ output "pubsub_subscription_name" {
 
 output "scc_notification_config_id" {
   description = "The resource ID of the SCC continuous export notification config."
-  value       = google_scc_notification_config.scc_notification_config.id
+  value       = local.scc_notification_id
 }
 
 output "scc_service_account" {
   description = "The native Security Command Center service account used to publish alerts."
-  value       = google_scc_notification_config.scc_notification_config.service_account
+  value       = local.scc_service_account
 }

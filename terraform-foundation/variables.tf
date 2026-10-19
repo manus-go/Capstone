@@ -1,7 +1,7 @@
 variable "project_id" {
   description = "The Google Cloud Project ID where Pub/Sub resources will be provisioned."
   type        = string
-  default     = "cloudguard-agent-sandbox"
+  default     = "go-capstone-manus"
 }
 
 variable "region" {
@@ -11,9 +11,9 @@ variable "region" {
 }
 
 variable "organization_id" {
-  description = "The Google Cloud Organization ID hosting Security Command Center (numeric ID, e.g., '123456789012')."
+  description = "The Google Cloud Organization ID hosting Security Command Center (leave empty for standalone project-level SCC)."
   type        = string
-  default     = "123456789012"
+  default     = ""
 }
 
 variable "pubsub_topic_name" {
