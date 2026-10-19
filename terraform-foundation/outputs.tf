@@ -42,3 +42,24 @@ output "bigquery_subscription_name" {
   description = "The name of the Pub/Sub BigQuery subscription."
   value       = google_pubsub_subscription.scc_high_alerts_bigquery_sub.name
 }
+
+output "firestore_database_name" {
+  description = "The name of the default Firestore database."
+  value       = google_firestore_database.default.name
+}
+
+output "cloud_function_name" {
+  description = "The name of the Cloud Function routing alerts to Firestore."
+  value       = google_cloudfunctions2_function.scc_alert_router.name
+}
+
+output "cloud_function_uri" {
+  description = "The URI of the Cloud Function service."
+  value       = google_cloudfunctions2_function.scc_alert_router.service_config[0].uri
+}
+
+output "cloud_function_sa" {
+  description = "The service account email executing the Cloud Function."
+  value       = google_service_account.alert_router.email
+}
+

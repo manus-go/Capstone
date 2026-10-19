@@ -22,3 +22,10 @@ bin/
 
 # Temporary / Log files
 *.log
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+

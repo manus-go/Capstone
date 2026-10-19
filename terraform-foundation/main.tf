@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -39,6 +43,48 @@ resource "google_project_service" "pubsub" {
 resource "google_project_service" "bigquery" {
   project                    = var.project_id
   service                    = "bigquery.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "firestore" {
+  project                    = var.project_id
+  service                    = "firestore.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "cloudfunctions" {
+  project                    = var.project_id
+  service                    = "cloudfunctions.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "cloudbuild" {
+  project                    = var.project_id
+  service                    = "cloudbuild.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "run" {
+  project                    = var.project_id
+  service                    = "run.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "artifactregistry" {
+  project                    = var.project_id
+  service                    = "artifactregistry.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
+resource "google_project_service" "eventarc" {
+  project                    = var.project_id
+  service                    = "eventarc.googleapis.com"
   disable_dependent_services = false
   disable_on_destroy         = false
 }
@@ -271,3 +317,144 @@ resource "google_pubsub_subscription" "scc_high_alerts_bigquery_sub" {
     google_bigquery_dataset_iam_member.pubsub_bigquery_data_editor
   ]
 }
+
+# -----------------------------------------------------------------------------
+# 7. Firestore Database for Alert Preferences and Processed Findings
+# -----------------------------------------------------------------------------
+resource "google_firestore_database" "default" {
+  project                 = var.project_id
+  name                    = "(default)"
+  location_id             = var.region
+  type                    = "FIRESTORE_NATIVE"
+  delete_protection_state = "DELETE_PROTECTION_DISABLED"
+  deletion_policy         = "DELETE"
+
+  depends_on = [google_project_service.firestore]
+}
+
+# -----------------------------------------------------------------------------
+# 8. Storage Bucket & Code Archive for Cloud Function Source
+# -----------------------------------------------------------------------------
+resource "google_storage_bucket" "function_source" {
+  name                        = "${var.project_id}-gcf-source"
+  location                    = var.region
+  project                     = var.project_id
+  uniform_bucket_level_access = true
+  force_destroy               = true
+
+  labels = {
+    environment = "sandbox"
+    managed_by  = "terraform"
+    system      = "cloudguard-agent"
+  }
+}
+
+data "archive_file" "function_source" {
+  type        = "zip"
+  source_dir  = "${path.module}/../functions/scc-alert-router"
+  output_path = "${path.module}/scc-alert-router.zip"
+}
+
+resource "google_storage_bucket_object" "function_zip" {
+  name   = "scc-alert-router-${data.archive_file.function_source.output_md5}.zip"
+  bucket = google_storage_bucket.function_source.name
+  source = data.archive_file.function_source.output_path
+}
+
+# -----------------------------------------------------------------------------
+# 9. Cloud Function Service Account & IAM Roles
+# -----------------------------------------------------------------------------
+resource "google_service_account" "alert_router" {
+  account_id   = "scc-alert-router-sa"
+  display_name = "SCC Alert Router Service Account"
+  project      = var.project_id
+}
+
+resource "google_project_iam_member" "alert_router_datastore_user" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "alert_router_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "alert_router_event_receiver" {
+  project = var.project_id
+  role    = "roles/eventarc.eventReceiver"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "alert_router_run_invoker" {
+  project = var.project_id
+  role    = "roles/run.invoker"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "pubsub_token_creator" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountTokenCreator"
+  member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+# -----------------------------------------------------------------------------
+# 10. Cloud Function (Gen 2) Subscribed to Pub/Sub Topic
+# -----------------------------------------------------------------------------
+resource "google_cloudfunctions2_function" "scc_alert_router" {
+  name        = var.cloud_function_name
+  location    = var.region
+  project     = var.project_id
+  description = "Evaluates SCC alerts from Pub/Sub against user preferences and stores them in Firestore."
+
+  build_config {
+    runtime     = "python311"
+    entry_point = "process_scc_alert"
+    source {
+      storage_source {
+        bucket = google_storage_bucket.function_source.name
+        object = google_storage_bucket_object.function_zip.name
+      }
+    }
+  }
+
+  service_config {
+    max_instance_count    = 5
+    min_instance_count    = 0
+    available_memory      = "256M"
+    timeout_seconds       = 60
+    service_account_email = google_service_account.alert_router.email
+    environment_variables = {
+      PROJECT_ID = var.project_id
+    }
+  }
+
+  event_trigger {
+    trigger_region        = var.region
+    event_type            = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic          = google_pubsub_topic.scc_high_alerts_topic.id
+    retry_policy          = "RETRY_POLICY_DO_NOT_RETRY"
+    service_account_email = google_service_account.alert_router.email
+  }
+
+  labels = {
+    environment = "sandbox"
+    managed_by  = "terraform"
+    system      = "cloudguard-agent"
+  }
+
+  depends_on = [
+    google_project_service.cloudfunctions,
+    google_project_service.run,
+    google_project_service.artifactregistry,
+    google_project_service.cloudbuild,
+    google_project_service.eventarc,
+    google_project_iam_member.pubsub_token_creator,
+    google_project_iam_member.alert_router_event_receiver,
+    google_firestore_database.default
+  ]
+}
+
+

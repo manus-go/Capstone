@@ -51,3 +51,10 @@ variable "bigquery_subscription_name" {
   type        = string
   default     = "scc-high-alerts-bigquery-sub"
 }
+
+variable "cloud_function_name" {
+  description = "The name of the Cloud Function processing SCC alerts and storing them in Firestore."
+  type        = string
+  default     = "scc-alert-router"
+}
+
