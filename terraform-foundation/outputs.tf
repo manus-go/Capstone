@@ -25,5 +25,5 @@ output "scc_notification_config_id" {
 
 output "scc_service_account" {
   description = "The native Security Command Center service account used to publish alerts."
-  value       = local.scc_service_account
+  value       = local.is_org_level ? try(google_scc_notification_config.scc_org_notification_config[0].service_account, local.scc_service_account) : try(google_scc_project_notification_config.scc_project_notification_config[0].service_account, local.scc_service_account)
 }

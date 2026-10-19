@@ -141,6 +141,15 @@ resource "google_scc_project_notification_config" "scc_project_notification_conf
   ]
 }
 
+# Ensure the actual service account assigned by GCP to the notification config has publisher permissions
+resource "google_pubsub_topic_iam_member" "scc_project_exported_publisher" {
+  count   = local.is_org_level ? 0 : 1
+  project = var.project_id
+  topic   = google_pubsub_topic.scc_high_alerts_topic.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_scc_project_notification_config.scc_project_notification_config[0].service_account}"
+}
+
 locals {
   scc_notification_id = local.is_org_level ? try(google_scc_notification_config.scc_org_notification_config[0].id, "") : try(google_scc_project_notification_config.scc_project_notification_config[0].id, "")
 }
