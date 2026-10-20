@@ -8,3 +8,9 @@ organization_id            = "123456789012"
 pubsub_topic_name          = "scc-high-alerts-topic"
 pubsub_subscription_name   = "scc-high-alerts-sub"
 scc_notification_config_id = "scc-high-alerts-config"
+
+# Optional: Google Chat & GitHub Integration
+# google_chat_webhook_url    = "https://chat.googleapis.com/v1/spaces/..."
+# github_token               = "gho_..."
+# github_repo                = "manus-go/Capstone"
+# github_base_branch         = "main"

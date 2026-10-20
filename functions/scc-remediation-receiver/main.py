@@ -1,9 +1,11 @@
+import base64
 import html
 import json
 import logging
 import os
 import re
 import sys
+import time
 import traceback
 from typing import Any, Dict, Optional, Tuple
 
@@ -24,6 +26,9 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "go-capstone-manus")
 VERTEX_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "europe-west2")
 VERTEX_MODEL = os.environ.get("VERTEX_AI_MODEL", "gemini-2.5-flash")
 GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "manus-go/Capstone")
+GITHUB_BASE_BRANCH = os.environ.get("GITHUB_BASE_BRANCH", "main")
 
 # Lazy-loaded Firestore client
 _db = None
@@ -332,6 +337,173 @@ Respond strictly with valid JSON matching the requested schema.
 
 
 # -----------------------------------------------------------------------------
+# GitHub Integration: Deterministic Pull Request Automation
+# -----------------------------------------------------------------------------
+def create_github_pull_request(
+    repo: str,
+    token: str,
+    base_branch: str,
+    issue_type: str,
+    resource_name: str,
+    finding_id: str,
+    option_number: int,
+    option_title: str,
+    option_strategy: str,
+    terraform_code: str,
+    explanation: str,
+    execution_instructions: str,
+) -> Dict[str, Any]:
+    """
+    Deterministically creates a Git branch, commits the generated Terraform HCL file,
+    and opens a GitHub Pull Request against the base branch.
+    """
+    if not repo or not token:
+        logger.warning("GitHub integration skipped: GITHUB_REPO or GITHUB_TOKEN not configured.")
+        return {"success": False, "skipped": True, "error": "GitHub credentials not configured"}
+
+    headers = {
+        "Authorization": f"token {token.strip()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "CloudGuard-SecOps-Receiver"
+    }
+    api_base = f"https://api.github.com/repos/{repo.strip()}"
+
+    # 1. Fetch base branch HEAD SHA
+    try:
+        ref_resp = requests.get(f"{api_base}/git/ref/heads/{base_branch}", headers=headers, timeout=15)
+        if ref_resp.status_code != 200:
+            err = f"Failed to retrieve base branch '{base_branch}': HTTP {ref_resp.status_code} - {ref_resp.text[:200]}"
+            logger.error(err)
+            return {"success": False, "error": err}
+        base_sha = ref_resp.json().get("object", {}).get("sha")
+        if not base_sha:
+            err = f"Could not extract commit SHA for base branch '{base_branch}'"
+            logger.error(err)
+            return {"success": False, "error": err}
+    except Exception as e:
+        logger.error(f"Error querying base branch: {e}")
+        return {"success": False, "error": str(e)}
+
+    # 2. Sanitize and prepare branch name
+    clean_issue = re.sub(r"[^a-zA-Z0-9_\-]", "_", issue_type).lower().strip("_")
+    short_fid = re.sub(r"[^a-zA-Z0-9]", "", finding_id)[-8:] if finding_id else "finding"
+    timestamp = int(time.time())
+    branch_name = f"remediation/{clean_issue}-{short_fid}-{timestamp}"
+
+    # 3. Create new branch
+    try:
+        branch_payload = {
+            "ref": f"refs/heads/{branch_name}",
+            "sha": base_sha
+        }
+        create_resp = requests.post(f"{api_base}/git/refs", json=branch_payload, headers=headers, timeout=15)
+        if create_resp.status_code not in (200, 201):
+            err = f"Failed to create Git branch '{branch_name}': HTTP {create_resp.status_code} - {create_resp.text[:200]}"
+            logger.error(err)
+            return {"success": False, "error": err}
+        logger.info(f"Created GitHub branch: {branch_name} (from {base_sha[:8]})")
+    except Exception as e:
+        logger.error(f"Error creating Git branch: {e}")
+        return {"success": False, "error": str(e)}
+
+    # 4. Determine file path and commit Terraform code
+    clean_res = resource_name.strip("/").split("/")[-1]
+    clean_res = re.sub(r"[^a-zA-Z0-9_\-]", "_", clean_res).lower().strip("_") or "resource"
+    file_path = f"remediations/{clean_issue}_{clean_res}.tf"
+
+    try:
+        b64_content = base64.b64encode(terraform_code.encode("utf-8")).decode("utf-8")
+        commit_payload = {
+            "message": f"fix(secops): remediate {issue_type} on {clean_res}\n\nAutomated fix for Option {option_number}: {option_title}",
+            "content": b64_content,
+            "branch": branch_name
+        }
+        commit_resp = requests.put(f"{api_base}/contents/{file_path}", json=commit_payload, headers=headers, timeout=15)
+        if commit_resp.status_code not in (200, 201):
+            err = f"Failed to commit file '{file_path}': HTTP {commit_resp.status_code} - {commit_resp.text[:200]}"
+            logger.error(err)
+            return {"success": False, "error": err}
+        logger.info(f"Committed Terraform code to {file_path} on branch {branch_name}")
+    except Exception as e:
+        logger.error(f"Error committing file to GitHub: {e}")
+        return {"success": False, "error": str(e)}
+
+    # 5. Open Pull Request
+    pr_title = f"[SecOps Fix] Remediate {issue_type} on {clean_res}"
+    pr_body = f"""## 🛡️ CloudGuard SecOps Automated Remediation
+
+### 📋 Finding Overview
+- **Security Finding Category:** `{issue_type}`
+- **Affected Resource:** `{resource_name}`
+- **Finding ID:** `{finding_id}`
+- **Selected Remediation:** Option {option_number} — **{option_title}**
+
+---
+
+### 🎯 Remediation Strategy
+{option_strategy}
+
+### 💡 Architectural Explanation
+{explanation}
+
+---
+
+### 📝 Generated Terraform File
+`{file_path}`
+
+```hcl
+{terraform_code}
+```
+
+---
+
+### ⚙️ Human Verification & Apply Instructions
+> ⚠️ **Safety Assurance:** This code has been staged in this pull request and **has NOT been applied** to live cloud infrastructure.
+
+1. **Review and test locally:**
+   ```bash
+   git fetch origin {branch_name}
+   git checkout {branch_name}
+   terraform init
+   terraform plan
+   ```
+2. **Merge:** Once approved by the SecOps / platform team, merge this pull request to incorporate into infrastructure-as-code baseline.
+"""
+
+    try:
+        pr_payload = {
+            "title": pr_title,
+            "head": branch_name,
+            "base": base_branch,
+            "body": pr_body,
+            "draft": False
+        }
+        pr_resp = requests.post(f"{api_base}/pulls", json=pr_payload, headers=headers, timeout=15)
+        if pr_resp.status_code not in (200, 201):
+            err = f"Failed to create Pull Request: HTTP {pr_resp.status_code} - {pr_resp.text[:200]}"
+            logger.error(err)
+            return {"success": False, "error": err}
+
+        pr_data = pr_resp.json()
+        pr_url = pr_data.get("html_url")
+        pr_number = pr_data.get("number")
+        logger.info(f"Successfully opened GitHub Pull Request #{pr_number}: {pr_url}")
+
+        return {
+            "success": True,
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "branch_name": branch_name,
+            "file_path": file_path,
+            "pr_title": pr_title
+        }
+    except Exception as e:
+        logger.error(f"Error creating GitHub Pull Request: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# -----------------------------------------------------------------------------
 # Dispatch Status to Google Chat Space
 # -----------------------------------------------------------------------------
 def notify_google_chat(webhook_url: str, text: str, card_payload: Optional[dict] = None) -> None:
@@ -364,7 +536,9 @@ def render_html_page(
     heading: str,
     details: list[str],
     code: Optional[str] = None,
-    explanation: Optional[str] = None
+    explanation: Optional[str] = None,
+    pr_url: Optional[str] = None,
+    pr_number: Optional[int] = None
 ) -> str:
     details_html = "".join(f"<li>{d}</li>" for d in details)
     code_block = ""
@@ -384,6 +558,20 @@ def render_html_page(
         <div class="explanation-box">
             <h4>Architectural Reasoning</h4>
             <p>{html.escape(explanation)}</p>
+        </div>
+        """
+
+    pr_button_block = ""
+    if pr_url:
+        pr_num_str = f"#{pr_number} " if pr_number else ""
+        pr_button_block = f"""
+        <div style="margin-bottom: 24px;">
+            <a href="{html.escape(pr_url)}" target="_blank" class="pr-button">
+                <svg height="18" width="18" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                </svg>
+                <span>Review Pull Request {pr_num_str}on GitHub &rarr;</span>
+            </a>
         </div>
         """
 
@@ -440,6 +628,24 @@ def render_html_page(
             margin: 0 0 16px 0;
             font-size: 24px;
             color: #ffffff;
+        }}
+        .pr-button {{
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #238636;
+            color: #ffffff;
+            padding: 12px 22px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 15px;
+            box-shadow: 0 1px 0 rgba(27,31,36,0.1);
+            transition: background-color 0.2s;
+        }}
+        .pr-button:hover {{
+            background-color: #2ea043;
+            text-decoration: none;
         }}
         ul.details-list {{
             list-style: none;
@@ -527,6 +733,7 @@ def render_html_page(
             <span>{badge_title}</span>
         </div>
         <h2>{heading}</h2>
+        {pr_button_block}
         <ul class="details-list">
             {details_html}
         </ul>
@@ -540,6 +747,7 @@ def render_html_page(
 </body>
 </html>
 """
+
 
 
 # -----------------------------------------------------------------------------
@@ -744,6 +952,36 @@ def handle_chat_webhook(request):
         prerequisites = agent_result.get("prerequisites", [])
         execution_instructions = agent_result.get("execution_instructions", "")
 
+        # ---------------------------------------------------------------------
+        # Approach 1: Deterministic GitHub Automation (Branch -> Commit -> PR)
+        # ---------------------------------------------------------------------
+        pr_result: Dict[str, Any] = {}
+        if GITHUB_TOKEN and GITHUB_REPO:
+            logger.info(f"Opening GitHub Pull Request in '{GITHUB_REPO}' for finding '{finding_key}'...")
+            pr_result = create_github_pull_request(
+                repo=GITHUB_REPO,
+                token=GITHUB_TOKEN,
+                base_branch=GITHUB_BASE_BRANCH,
+                issue_type=issue_type,
+                resource_name=resource_name,
+                finding_id=finding_key,
+                option_number=target_num,
+                option_title=selected_option.get("title", f"Option {target_num}"),
+                option_strategy=selected_option.get("strategy", ""),
+                terraform_code=tf_code,
+                explanation=explanation,
+                execution_instructions=execution_instructions,
+            )
+            logger.info(f"GitHub PR creation result: {pr_result.get('success')} (PR: {pr_result.get('pr_url')})")
+        else:
+            logger.info("GITHUB_TOKEN or GITHUB_REPO not configured. Staging only in Firestore.")
+
+        pr_success = bool(pr_result.get("success"))
+        pr_url = pr_result.get("pr_url")
+        pr_number = pr_result.get("pr_number")
+        branch_name = pr_result.get("branch_name")
+        file_path = pr_result.get("file_path")
+
         remediation_record = {
             "finding_id": finding_key,
             "issue_type": issue_type,
@@ -753,7 +991,7 @@ def handle_chat_webhook(request):
                 "title": selected_option.get("title"),
                 "strategy": selected_option.get("strategy")
             },
-            "status": "GENERATED_NOT_APPLIED",
+            "status": "PR_OPENED_NOT_APPLIED" if pr_success else "CODE_GENERATED_STAGED",
             "terraform_code": tf_code,
             "explanation": explanation,
             "prerequisites": prerequisites,
@@ -761,6 +999,18 @@ def handle_chat_webhook(request):
             "user_response_text": user_text or f"Option {target_num}",
             "generated_at": firestore.SERVER_TIMESTAMP
         }
+
+        if pr_success:
+            remediation_record["github_pr"] = {
+                "pr_url": pr_url,
+                "pr_number": pr_number,
+                "branch_name": branch_name,
+                "file_path": file_path,
+                "status": "OPEN",
+                "created_at": firestore.SERVER_TIMESTAMP
+            }
+        elif pr_result.get("error"):
+            remediation_record["github_pr_error"] = pr_result.get("error")
 
         # Update alert doc
         doc_ref.update({
@@ -771,42 +1021,71 @@ def handle_chat_webhook(request):
                 "decided_at": firestore.SERVER_TIMESTAMP
             },
             "remediation": remediation_record,
-            "remediation_status": "CODE_GENERATED_STAGED"
+            "remediation_status": "PR_OPENED" if pr_success else "CODE_GENERATED_STAGED"
         })
 
         db = get_firestore_client()
         db.collection("remediations").document(f"{issue_type}_{finding_key}").set(remediation_record)
 
         logger.info(
-            f"Terraform fix successfully coded by agent for '{finding_key}'. "
-            f"Safely staged in Firestore (NOT applied). Length: {len(tf_code)} chars."
+            f"Remediation processed for '{finding_key}'. Status: {remediation_record['status']}. "
+            f"Length: {len(tf_code)} chars."
         )
 
-        chat_msg_text = (
-            f"✅ *Terraform Fix Code Generated!*\n\n"
-            f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-            f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-            f"🔒 *Safety Policy:* The code has been safely staged in Firestore and *has NOT been applied* to live infrastructure.\n\n"
-            f"```hcl\n{tf_code[:1200]}\n```"
-        )
+        # Build notification for Google Chat and HTML UI
+        if pr_success and pr_url:
+            chat_msg_text = (
+                f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
+                f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
+                f"🌿 *Branch:* `{branch_name}`\n"
+                f"📁 *File:* `{file_path}`\n\n"
+                f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
+                f"It *has NOT been applied* to live infrastructure.\n\n"
+                f"```hcl\n{tf_code[:1000]}\n```"
+            )
+            details_list = [
+                f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
+                f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                f"<strong>GitHub Pull Request:</strong> <a href=\"{pr_url}\" target=\"_blank\" style=\"color: #58a6ff; font-weight: 600;\">#{pr_number} ({branch_name})</a>",
+                f"<strong>Committed File:</strong> <code>{file_path}</code>",
+                f"<strong>Remediation Strategy:</strong> {selected_option.get('strategy')}",
+                "<strong>Safety Status:</strong> Pull Request opened for human review (NOT applied to live cloud infrastructure)."
+            ]
+            heading_text = f"Pull Request Opened: #{pr_number}"
+        else:
+            chat_msg_text = (
+                f"✅ *Terraform Fix Code Generated!*\n\n"
+                f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                f"🔒 *Safety Policy:* The code has been safely staged in Firestore and *has NOT been applied* to live infrastructure.\n\n"
+                f"```hcl\n{tf_code[:1200]}\n```"
+            )
+            details_list = [
+                f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
+                f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                f"<strong>Remediation Strategy:</strong> {selected_option.get('strategy')}",
+                "<strong>Safety Status:</strong> Staged in Firestore (NOT applied to live cloud infrastructure)."
+            ]
+            if pr_result.get("error"):
+                details_list.append(f"<strong>GitHub Status:</strong> ⚠️ PR creation issue: {html.escape(str(pr_result.get('error')))}")
+            heading_text = f"Remediation Generated: {selected_option.get('title')}"
 
         notify_google_chat(GOOGLE_CHAT_WEBHOOK_URL, chat_msg_text)
 
         if wants_html:
             return (
                 render_html_page(
-                    badge_icon="✅",
-                    badge_title="Terraform Code Staged",
+                    badge_icon="🚀" if pr_success else "✅",
+                    badge_title="PR Opened for Review" if pr_success else "Terraform Code Staged",
                     badge_color="#3fb950",
-                    heading=f"Remediation Generated: {selected_option.get('title')}",
-                    details=[
-                        f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
-                        f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
-                        f"<strong>Remediation Strategy:</strong> {selected_option.get('strategy')}",
-                        "<strong>Safety Status:</strong> Staged in Firestore (NOT applied to live cloud infrastructure)."
-                    ],
+                    heading=heading_text,
+                    details=details_list,
                     code=tf_code,
-                    explanation=explanation
+                    explanation=explanation,
+                    pr_url=pr_url if pr_success else None,
+                    pr_number=pr_number if pr_success else None
                 ),
                 200,
                 {"Content-Type": "text/html; charset=utf-8"}
@@ -816,11 +1095,11 @@ def handle_chat_webhook(request):
             json.dumps({
                 "text": chat_msg_text,
                 "status": "success",
-                "action": "TERRAFORM_CODE_GENERATED",
+                "action": "GITHUB_PR_OPENED" if pr_success else "TERRAFORM_CODE_GENERATED",
                 "finding_id": finding_key,
                 "selected_option": target_num,
-                "code_staged_in_firestore": True,
-                "applied_to_infrastructure": false,
+                "github_pr": pr_result if pr_success else None,
+                "applied_to_infrastructure": False,
                 "terraform_code": tf_code,
                 "explanation": explanation
             }),

@@ -83,3 +83,22 @@ variable "vertex_ai_model" {
   default     = "gemini-2.5-flash"
 }
 
+variable "github_token" {
+  description = "Personal Access Token used by the remediation receiver to create branches, commit code, and open Pull Requests."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "github_repo" {
+  description = "GitHub repository in 'owner/repo' format where remediation PRs should be submitted."
+  type        = string
+  default     = "manus-go/Capstone"
+}
+
+variable "github_base_branch" {
+  description = "Target base branch for remediation Pull Requests."
+  type        = string
+  default     = "main"
+}
+

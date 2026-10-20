@@ -523,6 +523,9 @@ resource "google_cloudfunctions2_function" "scc_remediation_receiver" {
       VERTEX_AI_LOCATION      = var.vertex_ai_location
       VERTEX_AI_MODEL         = var.vertex_ai_model
       GOOGLE_CHAT_WEBHOOK_URL = var.google_chat_webhook_url
+      GITHUB_TOKEN            = var.github_token
+      GITHUB_REPO             = var.github_repo
+      GITHUB_BASE_BRANCH      = var.github_base_branch
     }
   }
 
