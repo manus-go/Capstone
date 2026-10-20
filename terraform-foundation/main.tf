@@ -426,7 +426,7 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
   name        = var.cloud_function_name
   location    = var.region
   project     = var.project_id
-  description = "Evaluates SCC alerts from Pub/Sub, uses Vertex AI for Terraform fix recommendations, and posts to Google Chat."
+  description = "Evaluates SCC alerts from Pub/Sub, uses Vertex AI for fix recommendations, and posts to Google Chat."
 
   build_config {
     runtime     = "python311"

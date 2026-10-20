@@ -75,13 +75,13 @@ def call_vertex_ai(payload: dict, project_id: str, location: str, model_name: st
     next_steps = finding.get("nextSteps", "")
 
     system_instruction = (
-        "You are an elite Principal Cloud Security Architect and GitOps Infrastructure Engineer. "
+        "You are an elite Principal Cloud Security Architect. "
         "Your role is to analyze Google Cloud Security Command Center (SCC) findings and provide "
-        "actionable remediation plans for platform engineering teams. "
-        "CRITICAL REQUIREMENT: For all fix options, you MUST generate production-ready, declarative "
-        "Terraform (HCL) code snippets (using appropriate google provider resource/data blocks) "
-        "instead of imperative gcloud CLI commands where possible. "
-        "You must explicitly recommend which fix option is best and provide rigorous GitOps and security reasoning."
+        "clear, actionable remediation strategies and fix options for security and platform engineering teams. "
+        "CRITICAL REQUIREMENT: Do NOT generate code snippets, CLI commands, scripts, or Terraform HCL blocks. "
+        "Instead, provide concise, high-level technical fix options and remediation strategies explaining "
+        "what actions should be taken, operational considerations, pros and cons. "
+        "You must explicitly recommend which fix option is best and provide rigorous security and architectural reasoning."
     )
 
     user_prompt = f"""
@@ -102,21 +102,19 @@ Respond strictly in JSON matching this exact structure:
     {{
       "option_number": 1,
       "title": "Clear descriptive name for this remediation option",
-      "strategy": "Summary of the approach and architecture change",
-      "terraform_code": "# Terraform HCL snippet implementing this fix\\nresource \\"...\\" \\"...\\" {{\\n  ...\\n}}",
-      "explanation": "Why this fixes the vulnerability, operational considerations, and trade-offs."
+      "strategy": "Concise summary of the approach and specific actions to take",
+      "trade_offs": "Operational considerations, pros/cons, and impact on workload or connectivity"
     }},
     {{
       "option_number": 2,
       "title": "Alternative remediation option name",
-      "strategy": "Alternative approach summary",
-      "terraform_code": "# Terraform HCL snippet implementing this fix\\nresource \\"...\\" \\"...\\" {{\\n  ...\\n}}",
-      "explanation": "Why this fixes the vulnerability and how it compares to Option 1."
+      "strategy": "Alternative approach summary and specific actions to take",
+      "trade_offs": "Operational considerations, pros/cons, and comparison to Option 1"
     }}
   ],
   "best_option": {{
     "recommended_title": "Exact title of the fix option you consider best",
-    "reasoning": "Detailed justification explaining why this option is objectively superior (e.g. least privilege, GitOps state immutability, blast-radius containment, defense-in-depth)."
+    "reasoning": "Detailed justification explaining why this option is objectively superior (e.g. least privilege, blast-radius containment, defense-in-depth, operational simplicity)."
   }}
 }}
 """
@@ -189,11 +187,17 @@ Respond strictly in JSON matching this exact structure:
     # Parse JSON structure
     parsed_analysis = None
     if raw_response_text:
+        text_to_parse = raw_response_text.strip()
+        # Strip markdown code fences if wrapped by the model
+        if text_to_parse.startswith("```"):
+            text_to_parse = re.sub(r"^```[a-zA-Z]*\n?", "", text_to_parse)
+            text_to_parse = re.sub(r"\n?```$", "", text_to_parse).strip()
+
         try:
-            parsed_analysis = json.loads(raw_response_text)
+            parsed_analysis = json.loads(text_to_parse)
         except Exception as json_err:
             # Fallback regex extraction if model returned wrapped markdown block
-            match = re.search(r"\{.*\}", raw_response_text, re.DOTALL)
+            match = re.search(r"\{.*\}", text_to_parse, re.DOTALL)
             if match:
                 try:
                     parsed_analysis = json.loads(match.group(0))
@@ -211,23 +215,20 @@ Respond strictly in JSON matching this exact structure:
             "fix_options": [
                 {
                     "option_number": 1,
-                    "title": "Declarative Policy Hardening",
-                    "strategy": "Apply principle of least privilege using Terraform resource bindings.",
-                    "terraform_code": (
-                        "# Remediation via Terraform\n"
-                        "# Define explicit, restrictive IAM or resource configurations:\n"
-                        "resource \"google_storage_bucket_iam_binding\" \"restricted_access\" {\n"
-                        f"  bucket = \"{resource_name.split('/')[-1]}\"\n"
-                        "  role   = \"roles/storage.objectViewer\"\n"
-                        "  members = [\"serviceAccount:app-sa@example.iam.gserviceaccount.com\"]\n"
-                        "}\n"
-                    ),
-                    "explanation": "Removes public exposure and enforces declarative infrastructure tracking in source control."
+                    "title": "Least-Privilege Access Restriction",
+                    "strategy": "Remove public/unrestricted permissions and restrict access exclusively to authorized identities or networks.",
+                    "trade_offs": "Requires maintaining an inventory of authorized caller identities or CIDR blocks."
+                },
+                {
+                    "option_number": 2,
+                    "title": "Private Resource Isolation",
+                    "strategy": "Migrate resource entirely behind private networking or VPC Service Controls, eliminating public internet exposure.",
+                    "trade_offs": "Provides defense-in-depth and eliminates external attack surface; requires internal routing or VPC peering."
                 }
             ],
             "best_option": {
-                "recommended_title": "Declarative Policy Hardening",
-                "reasoning": "Enforces least-privilege access and eliminates manual configuration drift via GitOps automation."
+                "recommended_title": "Private Resource Isolation",
+                "reasoning": "Completely removes the resource from the public internet, enforcing zero trust and defense-in-depth."
             }
         }
 
@@ -274,18 +275,18 @@ def build_google_chat_payload(
         f"⭐ *Recommended Fix (AI Choice):* *{best_title}*",
         f"_{best_reason}_",
         "",
-        "🛠️ *Remediation Options (Terraform):*"
+        "🛠️ *Fix Options:*"
     ]
 
     for idx, opt in enumerate(fix_options, 1):
         opt_title = opt.get("title", f"Option {idx}")
-        tf_code = opt.get("terraform_code", "").strip()
-        explanation = opt.get("explanation", "")
+        strategy = opt.get("strategy", "")
+        trade_offs = opt.get("trade_offs") or opt.get("explanation") or ""
         markdown_lines.append(f"\n*{idx}. {opt_title}*")
-        if explanation:
-            markdown_lines.append(explanation)
-        if tf_code:
-            markdown_lines.append(f"```hcl\n{tf_code}\n```")
+        if strategy:
+            markdown_lines.append(strategy)
+        if trade_offs:
+            markdown_lines.append(f"_Trade-offs & Considerations:_ {trade_offs}")
 
     full_markdown_text = "\n".join(markdown_lines)
 
@@ -323,37 +324,27 @@ def build_google_chat_payload(
         ]
     })
 
-    # Section 3: Terraform Fix Options
+    # Section 3: Fix Options
     option_widgets = []
     for idx, opt in enumerate(fix_options, 1):
         opt_title = opt.get("title", f"Option {idx}")
         strategy = opt.get("strategy", "")
-        tf_code = opt.get("terraform_code", "").strip()
-        explanation = opt.get("explanation", "")
+        trade_offs = opt.get("trade_offs") or opt.get("explanation") or ""
+
+        text_content = f"<b>Option {idx}: {opt_title}</b>"
+        if strategy:
+            text_content += f"<br>{strategy}"
+        if trade_offs:
+            text_content += f"<br><font color=\"#555555\"><i>Trade-offs:</i> {trade_offs}</font>"
 
         option_widgets.append({
             "textParagraph": {
-                "text": f"<b>Option {idx}: {opt_title}</b><br><i>{strategy}</i>"
+                "text": text_content
             }
         })
 
-        if tf_code:
-            # Code formatted inside pre block
-            option_widgets.append({
-                "textParagraph": {
-                    "text": f"<pre>{tf_code}</pre>"
-                }
-            })
-
-        if explanation:
-            option_widgets.append({
-                "textParagraph": {
-                    "text": f"<font color=\"#666666\">{explanation}</font>"
-                }
-            })
-
     card_sections.append({
-        "header": "🛠️ Terraform Remediation Options",
+        "header": "🛠️ Fix Options",
         "widgets": option_widgets
     })
 
@@ -608,7 +599,8 @@ def process_scc_alert(cloud_event):
             "location": vertex_location,
             "issue_summary": ai_analysis.get("issue_summary"),
             "fix_options": ai_analysis.get("fix_options"),
-            "best_option": ai_analysis.get("best_option")
+            "best_option": ai_analysis.get("best_option"),
+            "raw_output": ai_analysis.get("raw_output")
         },
         "google_chat": {
             "dispatch_status": chat_status,
