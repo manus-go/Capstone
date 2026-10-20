@@ -58,6 +58,12 @@ variable "cloud_function_name" {
   default     = "scc-alert-router"
 }
 
+variable "remediation_receiver_name" {
+  description = "The name of the Cloud Run webhook receiver processing user replies from Google Chat."
+  type        = string
+  default     = "scc-remediation-receiver"
+}
+
 variable "google_chat_webhook_url" {
   description = "The Incoming Webhook URL for the Google Chat space to deliver SecOps alerts and remediation plans."
   type        = string

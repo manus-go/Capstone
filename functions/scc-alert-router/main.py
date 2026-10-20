@@ -288,6 +288,10 @@ def build_google_chat_payload(
         if trade_offs:
             markdown_lines.append(f"_Trade-offs & Considerations:_ {trade_offs}")
 
+    markdown_lines.append("\n💬 *How to Respond:*")
+    markdown_lines.append("• Reply *\"Option 1\"* or *\"Option 2\"* to have the agent code the Terraform fix (safely staged).")
+    markdown_lines.append("• Reply *\"Don't act\"* or *\"Ignore\"* if you do not want to take action on this issue.")
+
     full_markdown_text = "\n".join(markdown_lines)
 
     # Google Chat Card V2
@@ -348,7 +352,23 @@ def build_google_chat_payload(
         "widgets": option_widgets
     })
 
-    # Section 4: Quick Action Links
+    # Section 4: Reply Instructions
+    card_sections.append({
+        "header": "⚡ Next Steps / Reply Options",
+        "widgets": [
+            {
+                "textParagraph": {
+                    "text": (
+                        "💬 <b>How to respond:</b><br>"
+                        "• Reply with <b>\"Option 1\"</b> or <b>\"Option 2\"</b> to trigger the AI agent to write the Terraform code.<br>"
+                        "• Reply with <b>\"Don't act\"</b> or <b>\"Ignore\"</b> if you do not want to take action on this issue."
+                    )
+                }
+            }
+        ]
+    })
+
+    # Section 5: Quick Action Links
     scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={project_id}"
     card_sections.append({
         "header": "🔗 Actions",

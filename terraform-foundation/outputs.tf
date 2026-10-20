@@ -63,3 +63,13 @@ output "cloud_function_sa" {
   value       = google_service_account.alert_router.email
 }
 
+output "remediation_receiver_name" {
+  description = "The name of the Cloud Run webhook receiver for user remediation replies."
+  value       = google_cloudfunctions2_function.scc_remediation_receiver.name
+}
+
+output "remediation_receiver_uri" {
+  description = "The HTTPS URI of the Cloud Run webhook receiver service."
+  value       = google_cloudfunctions2_function.scc_remediation_receiver.service_config[0].uri
+}
+

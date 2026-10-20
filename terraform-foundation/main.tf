@@ -368,6 +368,18 @@ resource "google_storage_bucket_object" "function_zip" {
   source = data.archive_file.function_source.output_path
 }
 
+data "archive_file" "remediation_receiver_source" {
+  type        = "zip"
+  source_dir  = "${path.module}/../functions/scc-remediation-receiver"
+  output_path = "${path.module}/scc-remediation-receiver.zip"
+}
+
+resource "google_storage_bucket_object" "remediation_receiver_zip" {
+  name   = "scc-remediation-receiver-${data.archive_file.remediation_receiver_source.output_md5}.zip"
+  bucket = google_storage_bucket.function_source.name
+  source = data.archive_file.remediation_receiver_source.output_path
+}
+
 # -----------------------------------------------------------------------------
 # 9. Cloud Function Service Account & IAM Roles
 # -----------------------------------------------------------------------------
@@ -477,6 +489,64 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
     google_project_iam_member.alert_router_event_receiver,
     google_firestore_database.default
   ]
+}
+
+# -----------------------------------------------------------------------------
+# 11. Cloud Run Webhook Receiver (Interactive Google Chat Remediation)
+# -----------------------------------------------------------------------------
+resource "google_cloudfunctions2_function" "scc_remediation_receiver" {
+  name        = var.remediation_receiver_name
+  location    = var.region
+  project     = var.project_id
+  description = "Cloud Run webhook receiver that processes Google Chat user replies to dismiss issues or generate Terraform code."
+
+  build_config {
+    runtime     = "python311"
+    entry_point = "handle_chat_webhook"
+    source {
+      storage_source {
+        bucket = google_storage_bucket.function_source.name
+        object = google_storage_bucket_object.remediation_receiver_zip.name
+      }
+    }
+  }
+
+  service_config {
+    max_instance_count    = 5
+    min_instance_count    = 0
+    available_memory      = "512M"
+    timeout_seconds       = 180
+    service_account_email = google_service_account.alert_router.email
+    environment_variables = {
+      PROJECT_ID              = var.project_id
+      VERTEX_AI_LOCATION      = var.vertex_ai_location
+      VERTEX_AI_MODEL         = var.vertex_ai_model
+      GOOGLE_CHAT_WEBHOOK_URL = var.google_chat_webhook_url
+    }
+  }
+
+  labels = {
+    environment = "sandbox"
+    managed_by  = "terraform"
+    system      = "cloudguard-agent"
+  }
+
+  depends_on = [
+    google_project_service.cloudfunctions,
+    google_project_service.run,
+    google_project_service.artifactregistry,
+    google_project_service.cloudbuild,
+    google_firestore_database.default
+  ]
+}
+
+# Allow unauthenticated invocations so Google Chat can reach the webhook endpoint
+resource "google_cloud_run_v2_service_iam_member" "remediation_receiver_invoker" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloudfunctions2_function.scc_remediation_receiver.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }
 
 
