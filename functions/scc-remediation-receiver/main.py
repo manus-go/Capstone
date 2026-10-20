@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -74,12 +75,12 @@ def classify_user_intent(
     """
     normalized_text = (text or "").strip().lower()
 
-    # Check explicit action parameter (e.g. from card action)
+    # Check explicit action parameter (e.g. from card action or query string)
     if action_param:
         act_lower = action_param.lower()
         if any(kw in act_lower for kw in ["ignore", "dismiss", "no_action", "cancel", "skip"]):
             return "NO_ACTION", None
-        if "remediate" in act_lower or "fix" in act_lower:
+        if "remediate" in act_lower or "fix" in act_lower or "option" in act_lower:
             try:
                 opt_num = int(option_param) if option_param is not None else 1
                 return "REMEDIATE", opt_num
@@ -88,7 +89,6 @@ def classify_user_intent(
 
     # Check for direct NO_ACTION intent
     for kw in NO_ACTION_KEYWORDS:
-        # Match as whole phrase or prefix/substring
         if re.search(rf"\b{re.escape(kw)}\b", normalized_text):
             return "NO_ACTION", None
 
@@ -111,7 +111,7 @@ def classify_user_intent(
 
     # Match "best" or "recommended"
     if re.search(r"\b(best|recommended)\b", normalized_text):
-        return "REMEDIATE", 1  # Will default or resolve to recommended option
+        return "REMEDIATE", 1
 
     # General affirmative words: "fix it", "apply", "remediate", "proceed"
     if any(kw in normalized_text for kw in ["fix", "remediate", "proceed", "code", "terraform"]):
@@ -138,13 +138,11 @@ def fetch_target_alert(
 
     # 1. Direct finding ID lookup
     if finding_id:
-        # Direct doc ID check
         doc_ref = alerts_col.document(finding_id)
         doc = doc_ref.get()
         if doc.exists:
             return doc_ref, doc.to_dict()
 
-        # Query finding_id field
         query = alerts_col.where("finding_id", "==", finding_id).limit(1)
         results = list(query.stream())
         if results:
@@ -317,7 +315,6 @@ Respond strictly with valid JSON matching the requested schema.
                     pass
 
     if not parsed_code_data:
-        # Fallback template if model call failed completely
         parsed_code_data = {
             "terraform_code": (
                 f"# Terraform Remediation for {issue_type}\n"
@@ -358,6 +355,194 @@ def notify_google_chat(webhook_url: str, text: str, card_payload: Optional[dict]
 
 
 # -----------------------------------------------------------------------------
+# HTML Response Renderer (For Browser Button Clicks)
+# -----------------------------------------------------------------------------
+def render_html_page(
+    badge_icon: str,
+    badge_title: str,
+    badge_color: str,
+    heading: str,
+    details: list[str],
+    code: Optional[str] = None,
+    explanation: Optional[str] = None
+) -> str:
+    details_html = "".join(f"<li>{d}</li>" for d in details)
+    code_block = ""
+    if code:
+        code_block = f"""
+        <div class="code-container">
+            <div class="code-header">
+                <span>Terraform Remediation (HCL)</span>
+                <span class="staged-tag">Safely Staged &bull; NOT Applied</span>
+            </div>
+            <pre><code>{html.escape(code)}</code></pre>
+        </div>
+        """
+    explanation_block = ""
+    if explanation:
+        explanation_block = f"""
+        <div class="explanation-box">
+            <h4>Architectural Reasoning</h4>
+            <p>{html.escape(explanation)}</p>
+        </div>
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudGuard SecOps Remediation</title>
+    <style>
+        :root {{
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --badge-bg: {badge_color}22;
+            --badge-text: {badge_color};
+            --accent-green: #3fb950;
+            --accent-blue: #58a6ff;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }}
+        .card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            max-width: 860px;
+            width: 100%;
+            padding: 32px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        }}
+        .badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background-color: var(--badge-bg);
+            color: var(--badge-text);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+            border: 1px solid {badge_color}44;
+            margin-bottom: 16px;
+        }}
+        h2 {{
+            margin: 0 0 16px 0;
+            font-size: 24px;
+            color: #ffffff;
+        }}
+        ul.details-list {{
+            list-style: none;
+            padding: 0;
+            margin: 16px 0 24px 0;
+        }}
+        ul.details-list li {{
+            padding: 6px 0;
+            color: var(--text-secondary);
+            font-size: 15px;
+            border-bottom: 1px solid #21262d;
+        }}
+        ul.details-list li strong {{
+            color: var(--text-primary);
+        }}
+        .explanation-box {{
+            background-color: #1f242c;
+            border-left: 4px solid var(--accent-blue);
+            padding: 14px 18px;
+            border-radius: 4px;
+            margin-bottom: 24px;
+        }}
+        .explanation-box h4 {{
+            margin: 0 0 6px 0;
+            color: var(--accent-blue);
+        }}
+        .explanation-box p {{
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-primary);
+        }}
+        .code-container {{
+            background-color: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        }}
+        .code-header {{
+            background-color: #1f242c;
+            padding: 10px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .staged-tag {{
+            background-color: #d2992222;
+            color: #e3b341;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        pre {{
+            margin: 0;
+            padding: 16px;
+            overflow-x: auto;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #79c0ff;
+        }}
+        .footer-note {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #1f242c;
+            border: 1px solid #30363d;
+            padding: 12px 16px;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">
+            <span>{badge_icon}</span>
+            <span>{badge_title}</span>
+        </div>
+        <h2>{heading}</h2>
+        <ul class="details-list">
+            {details_html}
+        </ul>
+        {explanation_block}
+        {code_block}
+        <div class="footer-note">
+            <span>💬</span>
+            <span>Confirmation update has been posted to your Google Chat space. You may return to Google Chat.</span>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+
+# -----------------------------------------------------------------------------
 # Cloud Run HTTP Webhook Handler
 # -----------------------------------------------------------------------------
 @functions_framework.http
@@ -368,7 +553,6 @@ def handle_chat_webhook(request):
     2. If user selects a fix option: invokes the Vertex AI agent to code the Terraform fix,
        stages the code safely in Firestore, and does NOT apply it.
     """
-    # Handle CORS preflight or GET health checks
     if request.method == "OPTIONS":
         return ("", 204, {
             "Access-Control-Allow-Origin": "*",
@@ -376,7 +560,9 @@ def handle_chat_webhook(request):
             "Access-Control-Allow-Headers": "Content-Type, Authorization"
         })
 
-    if request.method == "GET":
+    has_action_args = any(k in request.args for k in ["option", "option_number", "action", "text", "user_response"])
+
+    if request.method == "GET" and not has_action_args:
         return (
             json.dumps({
                 "status": "healthy",
@@ -388,17 +574,18 @@ def handle_chat_webhook(request):
             {"Content-Type": "application/json"}
         )
 
-    if request.method != "POST":
+    if request.method not in ["GET", "POST"]:
         return ("Method Not Allowed", 405)
 
-    try:
-        data = request.get_json(silent=True) or {}
-    except Exception:
-        data = {}
+    data = {}
+    if request.method == "POST":
+        try:
+            data = request.get_json(silent=True) or {}
+        except Exception:
+            data = {}
 
-    logger.info(f"Received webhook request: {json.dumps(data)[:500]}")
+    logger.info(f"Received webhook request ({request.method}): data={json.dumps(data)[:300]} args={request.args.to_dict()}")
 
-    # Extract user message details
     user_text = ""
     action_param = None
     option_param = None
@@ -422,21 +609,35 @@ def handle_chat_webhook(request):
         if not finding_id:
             finding_id = param_dict.get("finding_id")
         user_text = param_dict.get("text", "")
-    # Direct payload
+    # Query parameters (e.g. GET button click) or Direct POST
     else:
-        user_text = data.get("text") or data.get("user_response") or request.args.get("text") or ""
+        user_text = data.get("text") or data.get("user_response") or request.args.get("text") or request.args.get("user_response") or ""
         action_param = data.get("action") or request.args.get("action")
-        option_param = data.get("option_number") or data.get("option") or request.args.get("option")
+        option_param = data.get("option_number") or data.get("option") or request.args.get("option") or request.args.get("option_number")
 
     # Classify User Intent
     intent, chosen_option_num = classify_user_intent(user_text, action_param, option_param)
     logger.info(f"Intent evaluated: '{intent}' (chosen_option_num={chosen_option_num}) for text: '{user_text}'")
+
+    wants_html = request.method == "GET" or "text/html" in request.headers.get("Accept", "")
 
     # Find the target alert in Firestore
     doc_ref, alert_data = fetch_target_alert(finding_id=finding_id, thread_name=thread_name)
     if not doc_ref or not alert_data:
         msg = "⚠️ No matching security finding found in Firestore to evaluate."
         logger.warning(msg)
+        if wants_html:
+            return (
+                render_html_page(
+                    badge_icon="⚠️",
+                    badge_title="Not Found",
+                    badge_color="#f85149",
+                    heading="Finding Not Found",
+                    details=["No matching security finding found in Firestore to evaluate."]
+                ),
+                404,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
         return (
             json.dumps({"status": "not_found", "message": msg}),
             404,
@@ -459,7 +660,7 @@ def handle_chat_webhook(request):
         doc_ref.update({
             "user_response": {
                 "decision": "NO_ACTION",
-                "raw_text": user_text,
+                "raw_text": user_text or action_param or "ignore",
                 "decided_at": firestore.SERVER_TIMESTAMP
             },
             "remediation_status": "DISMISSED_NO_ACTION"
@@ -470,10 +671,26 @@ def handle_chat_webhook(request):
             f"on resource `{resource_name}`."
         )
 
-        # Notify Chat space
         notify_google_chat(GOOGLE_CHAT_WEBHOOK_URL, chat_response_text)
 
-        # Return Google Chat response format
+        if wants_html:
+            return (
+                render_html_page(
+                    badge_icon="🛑",
+                    badge_title="Dismissed by User",
+                    badge_color="#f85149",
+                    heading=f"Security Finding Dismissed: {issue_type}",
+                    details=[
+                        f"<strong>Finding ID:</strong> <code>{finding_key}</code>",
+                        f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                        "<strong>Decision:</strong> No action taken. Remediation skipped.",
+                        "<strong>Status:</strong> Successfully recorded in Firestore."
+                    ]
+                ),
+                200,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
+
         return (
             json.dumps({
                 "text": chat_response_text,
@@ -489,7 +706,6 @@ def handle_chat_webhook(request):
     # CASE 2: User picked a Fix Option -> Generate Terraform Fix (Do not apply)
     # -------------------------------------------------------------------------
     elif intent == "REMEDIATE":
-        # Resolve which fix option object was selected
         selected_option = None
         target_num = chosen_option_num or 1
 
@@ -515,7 +731,6 @@ def handle_chat_webhook(request):
             f"using Option {target_num}: '{selected_option.get('title')}'"
         )
 
-        # Invoke Vertex AI Agent to write the Terraform code
         agent_result = run_terraform_coding_agent(
             finding_data=alert_data,
             selected_option=selected_option,
@@ -529,7 +744,6 @@ def handle_chat_webhook(request):
         prerequisites = agent_result.get("prerequisites", [])
         execution_instructions = agent_result.get("execution_instructions", "")
 
-        # Safe Staging: Store generated code in Firestore, but DO NOT APPLY
         remediation_record = {
             "finding_id": finding_key,
             "issue_type": issue_type,
@@ -544,7 +758,7 @@ def handle_chat_webhook(request):
             "explanation": explanation,
             "prerequisites": prerequisites,
             "execution_instructions": execution_instructions,
-            "user_response_text": user_text,
+            "user_response_text": user_text or f"Option {target_num}",
             "generated_at": firestore.SERVER_TIMESTAMP
         }
 
@@ -553,14 +767,13 @@ def handle_chat_webhook(request):
             "user_response": {
                 "decision": "REMEDIATE",
                 "chosen_option": target_num,
-                "raw_text": user_text,
+                "raw_text": user_text or f"Option {target_num}",
                 "decided_at": firestore.SERVER_TIMESTAMP
             },
             "remediation": remediation_record,
             "remediation_status": "CODE_GENERATED_STAGED"
         })
 
-        # Save to 'remediations' collection
         db = get_firestore_client()
         db.collection("remediations").document(f"{issue_type}_{finding_key}").set(remediation_record)
 
@@ -569,7 +782,6 @@ def handle_chat_webhook(request):
             f"Safely staged in Firestore (NOT applied). Length: {len(tf_code)} chars."
         )
 
-        # Build Google Chat response
         chat_msg_text = (
             f"✅ *Terraform Fix Code Generated!*\n\n"
             f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
@@ -580,6 +792,26 @@ def handle_chat_webhook(request):
 
         notify_google_chat(GOOGLE_CHAT_WEBHOOK_URL, chat_msg_text)
 
+        if wants_html:
+            return (
+                render_html_page(
+                    badge_icon="✅",
+                    badge_title="Terraform Code Staged",
+                    badge_color="#3fb950",
+                    heading=f"Remediation Generated: {selected_option.get('title')}",
+                    details=[
+                        f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
+                        f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                        f"<strong>Remediation Strategy:</strong> {selected_option.get('strategy')}",
+                        "<strong>Safety Status:</strong> Staged in Firestore (NOT applied to live cloud infrastructure)."
+                    ],
+                    code=tf_code,
+                    explanation=explanation
+                ),
+                200,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
+
         return (
             json.dumps({
                 "text": chat_msg_text,
@@ -588,7 +820,7 @@ def handle_chat_webhook(request):
                 "finding_id": finding_key,
                 "selected_option": target_num,
                 "code_staged_in_firestore": True,
-                "applied_to_infrastructure": False,
+                "applied_to_infrastructure": false,
                 "terraform_code": tf_code,
                 "explanation": explanation
             }),
@@ -606,6 +838,21 @@ def handle_chat_webhook(request):
             f"• *\"Option 1\"* or *\"Option 2\"* to have the agent write the Terraform code for that fix option.\n"
             f"• *\"Don't act\"* or *\"Ignore\"* if you do not want to take action on this issue."
         )
+        if wants_html:
+            return (
+                render_html_page(
+                    badge_icon="❓",
+                    badge_title="Clarification Needed",
+                    badge_color="#d29922",
+                    heading="Unrecognized Response",
+                    details=[
+                        f"Received input: <code>{user_text}</code>",
+                        "Please select Option 1, Option 2, or Don't Act."
+                    ]
+                ),
+                200,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
         return (
             json.dumps({"text": clarification_msg, "status": "clarification_needed"}),
             200,

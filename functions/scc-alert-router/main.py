@@ -241,14 +241,17 @@ def build_google_chat_payload(
     severity: str,
     resource_name: str,
     ai_analysis: dict,
-    project_id: str
+    project_id: str,
+    finding_id: str = "",
+    receiver_url: str = ""
 ) -> dict:
     """
     Constructs a Google Chat message containing both a rich Card V2
     and companion Markdown text with:
     1. Issue Summary
-    2. Terraform Fix Options
+    2. Remediation Fix Options
     3. Explicit Best Option Recommendation
+    4. One-Click Interactive Buttons and Links
     """
     summary = ai_analysis.get("issue_summary", "No summary provided.")
     fix_options = ai_analysis.get("fix_options", [])
@@ -288,9 +291,16 @@ def build_google_chat_payload(
         if trade_offs:
             markdown_lines.append(f"_Trade-offs & Considerations:_ {trade_offs}")
 
-    markdown_lines.append("\n💬 *How to Respond:*")
-    markdown_lines.append("• Reply *\"Option 1\"* or *\"Option 2\"* to have the agent code the Terraform fix (safely staged).")
-    markdown_lines.append("• Reply *\"Don't act\"* or *\"Ignore\"* if you do not want to take action on this issue.")
+    markdown_lines.append("\n⚡ *Take Action (Click below or reply):*")
+    if receiver_url and finding_id:
+        for idx, opt in enumerate(fix_options, 1):
+            opt_num = opt.get("option_number", idx)
+            opt_title = opt.get("title", f"Option {opt_num}")
+            markdown_lines.append(f"• [🛠️ Code Fix Option {opt_num} ({opt_title})]({receiver_url}/?finding_id={finding_id}&option={opt_num})")
+        markdown_lines.append(f"• [🛑 Don't Act (Ignore Finding)]({receiver_url}/?finding_id={finding_id}&action=ignore)")
+    else:
+        markdown_lines.append("• Reply *\"Option 1\"* or *\"Option 2\"* to have the agent code the Terraform fix (safely staged).")
+        markdown_lines.append("• Reply *\"Don't act\"* or *\"Ignore\"* if you do not want to take action on this issue.")
 
     full_markdown_text = "\n".join(markdown_lines)
 
@@ -360,31 +370,51 @@ def build_google_chat_payload(
                 "textParagraph": {
                     "text": (
                         "💬 <b>How to respond:</b><br>"
-                        "• Reply with <b>\"Option 1\"</b> or <b>\"Option 2\"</b> to trigger the AI agent to write the Terraform code.<br>"
-                        "• Reply with <b>\"Don't act\"</b> or <b>\"Ignore\"</b> if you do not want to take action on this issue."
+                        "• Click a button below or reply with <b>\"Option 1\"</b> / <b>\"Option 2\"</b> to have the agent write the Terraform code.<br>"
+                        "• Click <b>\"Don't Act\"</b> or reply with <b>\"Don't act\"</b> to dismiss."
                     )
                 }
             }
         ]
     })
 
-    # Section 5: Quick Action Links
+    # Section 5: Action Buttons (Interactive Links)
     scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={project_id}"
+    action_buttons = []
+    if receiver_url and finding_id:
+        for idx, opt in enumerate(fix_options, 1):
+            opt_num = opt.get("option_number", idx)
+            action_buttons.append({
+                "text": f"🛠️ Code Option {opt_num}",
+                "onClick": {
+                    "openLink": {
+                        "url": f"{receiver_url}/?finding_id={finding_id}&option={opt_num}"
+                    }
+                }
+            })
+        action_buttons.append({
+            "text": "🛑 Don't Act",
+            "onClick": {
+                "openLink": {
+                    "url": f"{receiver_url}/?finding_id={finding_id}&action=ignore"
+                }
+            }
+        })
+    action_buttons.append({
+        "text": "View in SCC Console",
+        "onClick": {
+            "openLink": {
+                "url": scc_console_url
+            }
+        }
+    })
+
     card_sections.append({
-        "header": "🔗 Actions",
+        "header": "🔗 One-Click Actions",
         "widgets": [
             {
                 "buttonList": {
-                    "buttons": [
-                        {
-                            "text": "View in SCC Console",
-                            "onClick": {
-                                "openLink": {
-                                    "url": scc_console_url
-                                }
-                            }
-                        }
-                    ]
+                    "buttons": action_buttons
                 }
             }
         ]
@@ -588,12 +618,15 @@ def process_scc_alert(cloud_event):
     )
 
     # Step 4: Build Google Chat Card V2 and dispatch
+    receiver_url = os.environ.get("REMEDIATION_RECEIVER_URL", "https://scc-remediation-receiver-nntcdytgna-nw.a.run.app")
     chat_payload = build_google_chat_payload(
         issue_type=issue_type,
         severity=severity,
         resource_name=resource_name,
         ai_analysis=ai_analysis,
-        project_id=project_id
+        project_id=project_id,
+        finding_id=finding_id,
+        receiver_url=receiver_url
     )
 
     chat_status, chat_details = dispatch_to_google_chat(

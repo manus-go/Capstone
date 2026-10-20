@@ -458,10 +458,11 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
     timeout_seconds       = 120
     service_account_email = google_service_account.alert_router.email
     environment_variables = {
-      PROJECT_ID              = var.project_id
-      VERTEX_AI_LOCATION      = var.vertex_ai_location
-      VERTEX_AI_MODEL         = var.vertex_ai_model
-      GOOGLE_CHAT_WEBHOOK_URL = var.google_chat_webhook_url
+      PROJECT_ID               = var.project_id
+      VERTEX_AI_LOCATION       = var.vertex_ai_location
+      VERTEX_AI_MODEL          = var.vertex_ai_model
+      GOOGLE_CHAT_WEBHOOK_URL  = var.google_chat_webhook_url
+      REMEDIATION_RECEIVER_URL = google_cloudfunctions2_function.scc_remediation_receiver.service_config[0].uri
     }
   }
 
