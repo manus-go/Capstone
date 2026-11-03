@@ -1,5 +1,6 @@
 functions-framework>=3.5.0
 google-cloud-firestore>=2.14.0
-google-cloud-aiplatform>=1.60.0
+google-adk>=2.13.0
+google-genai>=2.30.0
 google-auth>=2.20.0
 requests>=2.31.0

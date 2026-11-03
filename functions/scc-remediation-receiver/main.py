@@ -7,11 +7,15 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import functions_framework
-from google.cloud import firestore
 import requests
+from google.cloud import firestore
+from google.adk.agents import Agent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 
 # -----------------------------------------------------------------------------
 # Environment Loader
@@ -214,191 +218,7 @@ def fetch_target_alert(
     return None, None
 
 
-# -----------------------------------------------------------------------------
-# Vertex AI Agent: Terraform Code Generator
-# -----------------------------------------------------------------------------
-def run_terraform_coding_agent(
-    finding_data: Dict[str, Any],
-    selected_option: Dict[str, Any],
-    project_id: str,
-    location: str,
-    model_name: str
-) -> Dict[str, Any]:
-    """
-    Invokes the Vertex AI Gemini agent to write production-grade Terraform HCL
-    implementing the specific fix option selected by the user.
-    """
-    issue_type = finding_data.get("issue_type") or finding_data.get("category", "SECURITY_FINDING")
-    severity = finding_data.get("severity", "HIGH")
-    resource_name = finding_data.get("resource_name", "target_resource")
-    raw_payload = finding_data.get("raw_payload", {})
-    finding = raw_payload.get("finding", {})
-    description = finding.get("description", "Security vulnerability detected by SCC.")
-    next_steps = finding.get("nextSteps", "")
 
-    opt_num = selected_option.get("option_number", 1)
-    opt_title = selected_option.get("title", f"Remediation Option {opt_num}")
-    opt_strategy = selected_option.get("strategy", "")
-    opt_trade_offs = selected_option.get("trade_offs") or selected_option.get("explanation", "")
-
-    system_instruction = (
-        "You are an expert Principal Cloud Infrastructure-as-Code (IaC) Senior Architect specializing "
-        "in Google Cloud Platform (GCP) and HashiCorp Terraform.\n"
-        "Your task is to write complete, production-ready, declarative Terraform (HCL) code to remediate "
-        "a Google Cloud Security Command Center (SCC) security finding according to the specific remediation "
-        "option selected by the platform administrator.\n\n"
-        "CRITICAL REQUIREMENTS:\n"
-        "1. Write canonical, syntactically valid Terraform HCL using official `google` or `google-beta` provider resources.\n"
-        "2. Provide complete code blocks—do NOT use pseudocode or leave incomplete placeholder comments.\n"
-        "3. Parameterize identifiers using Terraform variables or locals with sensible defaults.\n"
-        "4. Include inline comments explaining how each resource and attribute remediates the security risk.\n"
-        "5. Provide clear, actionable operational instructions: state import (if existing resource), terraform plan, and apply.\n\n"
-        "Respond STRICTLY in valid JSON matching this schema:\n"
-        "{\n"
-        '  "terraform_code": "# Complete Terraform HCL snippet\\nresource \\"google_...\\" \\"...\\" {\\n  ...\\n}",\n'
-        '  "explanation": "Detailed architectural explanation of the generated code and why it implements the chosen option.",\n'
-        '  "prerequisites": ["List of required IAM permissions, APIs, or provider versions"],\n'
-        '  "execution_instructions": "Step-by-step CLI commands (terraform import, init, plan, apply)"\n'
-        "}"
-    )
-
-    user_prompt = f"""
-Remediate the following Google Cloud Security Command Center (SCC) finding:
-
-[FINDING DETAILS]
-- Finding Category / Issue: {issue_type}
-- Severity: {severity}
-- Affected Resource: {resource_name}
-- SCC Description: {description}
-- SCC Suggested Next Steps: {next_steps}
-- Raw Finding Attributes: {json.dumps(finding.get("sourceProperties", {}), indent=2)}
-
-[SELECTED REMEDIATION OPTION]
-- Option Number: {opt_num}
-- Title: {opt_title}
-- Strategy: {opt_strategy}
-- Operational Trade-offs: {opt_trade_offs}
-
-Write the complete Terraform (HCL) remediation code that implements this exact strategy.
-Respond strictly with valid JSON matching the requested schema.
-"""
-
-    raw_response = ""
-
-    # Attempt 1: Vertex AI Python SDK
-    try:
-        import vertexai
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
-
-        vertexai.init(project=project_id, location=location)
-        model = GenerativeModel(
-            model_name=model_name,
-            system_instruction=[system_instruction],
-        )
-        try:
-            gen_config = GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                max_output_tokens=16384,
-                thinking_config={"thinking_budget": 1024}
-            )
-        except Exception:
-            gen_config = GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                max_output_tokens=16384,
-            )
-        response = model.generate_content(user_prompt, generation_config=gen_config)
-        raw_response = response.text
-        logger.info(f"Remediation Agent response received via SDK ({len(raw_response)} chars)")
-    except Exception as sdk_err:
-        logger.warning(f"Remediation Agent SDK call issue: {sdk_err}. Falling back to REST API.")
-
-    # Attempt 2: Direct REST API Fallback
-    if not raw_response:
-        try:
-            import google.auth
-            from google.auth.transport.requests import Request as AuthRequest
-
-            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            creds.refresh(AuthRequest())
-
-            rest_url = (
-                f"https://{location}-aiplatform.googleapis.com/v1/"
-                f"projects/{project_id}/locations/{location}/publishers/google/models/{model_name}:generateContent"
-            )
-            body = {
-                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                "systemInstruction": {"parts": [{"text": system_instruction}]},
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.1,
-                    "maxOutputTokens": 16384,
-                    "thinkingConfig": {
-                        "thinkingBudget": 1024
-                    }
-                },
-            }
-            headers = {
-                "Authorization": f"Bearer {creds.token}",
-                "Content-Type": "application/json",
-            }
-            res = requests.post(rest_url, json=body, headers=headers, timeout=60)
-            res.raise_for_status()
-            res_json = res.json()
-            raw_response = res_json["candidates"][0]["content"]["parts"][0]["text"]
-            logger.info(f"Remediation Agent response received via REST API ({len(raw_response)} chars)")
-        except Exception as rest_err:
-            logger.error(f"Remediation Agent REST API failure: {rest_err}")
-
-    # Parse and validate response
-    parsed_code_data = None
-    if raw_response:
-        cleaned_text = raw_response.strip()
-        if cleaned_text.startswith("```"):
-            cleaned_text = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned_text)
-            cleaned_text = re.sub(r"\n?```$", "", cleaned_text).strip()
-
-        try:
-            parsed_code_data = json.loads(cleaned_text)
-        except Exception:
-            match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
-            if match:
-                try:
-                    parsed_code_data = json.loads(match.group(0))
-                except Exception:
-                    pass
-
-        # Fallback regex extraction if full JSON parsing failed but terraform_code exists
-        if not parsed_code_data or not parsed_code_data.get("terraform_code"):
-            tf_match = re.search(r'"terraform_code"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned_text, re.DOTALL)
-            if tf_match:
-                try:
-                    code_val = json.loads(f'"{tf_match.group(1)}"')
-                    parsed_code_data = {
-                        "terraform_code": code_val,
-                        "explanation": f"Automated Terraform remediation implementing: {opt_title}.",
-                        "prerequisites": ["google provider >= 5.0.0"],
-                        "execution_instructions": "1. terraform init\n2. terraform plan\n3. terraform apply"
-                    }
-                except Exception:
-                    pass
-
-    if not parsed_code_data:
-        parsed_code_data = {
-            "terraform_code": (
-                f"# Terraform Remediation for {issue_type}\n"
-                f"# Strategy: {opt_strategy}\n\n"
-                f"# Resource remediation snippet\n"
-                f"# Please inspect resource '{resource_name}' in project '{project_id}'.\n"
-            ),
-            "explanation": f"Automated remediation template implementing: {opt_title}.",
-            "prerequisites": ["google provider >= 5.0.0"],
-            "execution_instructions": "1. terraform init\n2. terraform plan\n3. terraform apply"
-        }
-
-    parsed_code_data["raw_agent_output"] = raw_response
-    return parsed_code_data
 
 
 # -----------------------------------------------------------------------------
@@ -589,6 +409,331 @@ def notify_google_chat(webhook_url: str, text: str, card_payload: Optional[dict]
         logger.info(f"Google Chat notification posted (HTTP {resp.status_code})")
     except Exception as e:
         logger.warning(f"Failed to post notification to Google Chat: {e}")
+
+
+
+# -----------------------------------------------------------------------------
+# Google ADK Remediation Agent: Autonomous Multi-Tool GitOps Pipeline
+# -----------------------------------------------------------------------------
+def run_scc_remediation_agent(
+    alert_doc_ref,
+    alert_data: Dict[str, Any],
+    finding_id: str,
+    issue_type: str,
+    resource_name: str,
+    selected_option: Dict[str, Any],
+    target_num: int,
+    user_text: str,
+    project_id: str,
+    location: str,
+    model_name: str,
+    github_repo: str,
+    github_token: str,
+    github_base_branch: str,
+    chat_webhook_url: str
+) -> Dict[str, Any]:
+    """
+    Invokes the Google Agent Development Kit (ADK) autonomous Remediation Agent
+    equipped with 4 specialized operational tools:
+    1. validate_terraform_code
+    2. create_github_pull_request_tool
+    3. record_remediation_audit
+    4. dispatch_google_chat_notification
+    """
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+    os.environ["GOOGLE_CLOUD_LOCATION"] = location
+
+    raw_payload = alert_data.get("raw_payload", {})
+    finding_raw = raw_payload.get("finding", {})
+    description = finding_raw.get("description", "Security vulnerability detected by SCC.")
+    next_steps = finding_raw.get("nextSteps", "")
+    source_properties = finding_raw.get("sourceProperties", {})
+
+    agent_state: Dict[str, Any] = {
+        "terraform_code": None,
+        "explanation": None,
+        "pr_result": None,
+        "audit_result": None,
+        "chat_notified": False,
+        "chat_msg_text": None,
+        "remediation_record": None
+    }
+
+    # Tool 1: validate_terraform_code
+    def validate_terraform_code(terraform_code: str, resource_type: str) -> dict:
+        """Validates the syntax and structural completeness of the generated Terraform HCL code.
+
+        Args:
+            terraform_code: Complete Terraform (HCL) configuration snippet to validate.
+            resource_type: Target GCP resource type (e.g. google_storage_bucket, google_compute_firewall).
+        """
+        if not terraform_code or not terraform_code.strip():
+            return {"valid": False, "error": "Terraform code is empty."}
+
+        has_block = bool(re.search(r'(resource|module|locals|variable)\s+"?[a-zA-Z0-9_\-]+"?', terraform_code))
+        if not has_block:
+            return {"valid": False, "error": "Terraform code does not contain any valid resource, module, locals, or variable blocks."}
+
+        open_braces = terraform_code.count("{")
+        close_braces = terraform_code.count("}")
+        if open_braces != close_braces:
+            return {"valid": False, "error": f"Mismatched braces: {open_braces} open vs {close_braces} close."}
+
+        agent_state["terraform_code"] = terraform_code
+        agent_state["resource_type"] = resource_type
+        logger.info(f"ADK Tool [validate_terraform_code]: Validated {len(terraform_code)} chars for {resource_type}.")
+        return {
+            "valid": True,
+            "status": "VALID",
+            "message": f"Terraform code for '{resource_type}' validated successfully ({len(terraform_code)} characters, {open_braces} blocks)."
+        }
+
+    # Tool 2: create_github_pull_request_tool
+    def create_github_pull_request_tool(
+        file_path: str,
+        commit_message: str,
+        pr_title: str,
+        pr_summary: str
+    ) -> dict:
+        """Stages the validated Terraform code onto a new Git branch and opens a GitHub Pull Request for human review.
+
+        Args:
+            file_path: Relative repository file path for the Terraform code (e.g. remediations/open_ssh_port_firewall.tf).
+            commit_message: Descriptive Git commit message explaining the security remediation.
+            pr_title: Title for the GitHub Pull Request (e.g. [SecOps Fix] Remediate OPEN_SSH_PORT).
+            pr_summary: Detailed markdown description of the vulnerability, chosen fix strategy, and verification instructions.
+        """
+        tf_code = agent_state.get("terraform_code")
+        if not tf_code:
+            return {"success": False, "error": "No validated Terraform code found. Call validate_terraform_code first."}
+
+        agent_state["explanation"] = pr_summary
+
+        if not github_token or not github_repo:
+            agent_state["pr_result"] = {"success": False, "skipped": True, "error": "GitHub credentials not configured"}
+            return {"success": False, "status": "SKIPPED", "message": "GitHub repository/token not configured; staging in Firestore only."}
+
+        pr_res = create_github_pull_request(
+            repo=github_repo,
+            token=github_token,
+            base_branch=github_base_branch,
+            issue_type=issue_type,
+            resource_name=resource_name,
+            finding_id=finding_id,
+            option_number=target_num,
+            option_title=selected_option.get("title", f"Option {target_num}"),
+            option_strategy=selected_option.get("strategy", ""),
+            terraform_code=tf_code,
+            explanation=pr_summary,
+            execution_instructions="1. git checkout <branch>\n2. terraform plan\n3. terraform apply"
+        )
+        agent_state["pr_result"] = pr_res
+        logger.info(f"ADK Tool [create_github_pull_request_tool]: PR Result: success={pr_res.get('success')} (PR #{pr_res.get('pr_number')})")
+        return pr_res
+
+    # Tool 3: record_remediation_audit
+    def record_remediation_audit(
+        audit_status: str,
+        audit_notes: str
+    ) -> dict:
+        """Records the remediation outcome, generated Terraform configuration, and GitHub PR details in Firestore.
+
+        Args:
+            audit_status: High-level status of the remediation (e.g. PR_OPENED_NOT_APPLIED or CODE_GENERATED_STAGED).
+            audit_notes: Technical summary of the remediation actions taken by the agent.
+        """
+        tf_code = agent_state.get("terraform_code", "")
+        pr_res = agent_state.get("pr_result") or {}
+        pr_success = bool(pr_res.get("success"))
+
+        remediation_record = {
+            "finding_id": finding_id,
+            "issue_type": issue_type,
+            "resource_name": resource_name,
+            "selected_option": {
+                "option_number": target_num,
+                "title": selected_option.get("title"),
+                "strategy": selected_option.get("strategy")
+            },
+            "status": "PR_OPENED_NOT_APPLIED" if pr_success else audit_status,
+            "terraform_code": tf_code,
+            "audit_notes": audit_notes,
+            "user_response_text": user_text or f"Option {target_num}",
+            "generated_at": firestore.SERVER_TIMESTAMP
+        }
+
+        if pr_success:
+            remediation_record["github_pr"] = {
+                "pr_url": pr_res.get("pr_url"),
+                "pr_number": pr_res.get("pr_number"),
+                "branch_name": pr_res.get("branch_name"),
+                "file_path": pr_res.get("file_path"),
+                "status": "OPEN",
+                "created_at": firestore.SERVER_TIMESTAMP
+            }
+        elif pr_res.get("error"):
+            remediation_record["github_pr_error"] = pr_res.get("error")
+
+        if alert_doc_ref:
+            alert_doc_ref.update({
+                "user_response": {
+                    "decision": "REMEDIATE",
+                    "chosen_option": target_num,
+                    "raw_text": user_text or f"Option {target_num}",
+                    "decided_at": firestore.SERVER_TIMESTAMP
+                },
+                "remediation": remediation_record,
+                "remediation_status": "PR_OPENED" if pr_success else "CODE_GENERATED_STAGED"
+            })
+
+        db = get_firestore_client()
+        db.collection("remediations").document(f"{issue_type}_{finding_id}").set(remediation_record)
+        agent_state["remediation_record"] = remediation_record
+        agent_state["audit_result"] = {"status": "RECORDED", "audit_id": f"{issue_type}_{finding_id}"}
+        logger.info("ADK Tool [record_remediation_audit]: Successfully recorded audit in Firestore.")
+        return {"status": "RECORDED", "audit_id": f"{issue_type}_{finding_id}"}
+
+    # Tool 4: dispatch_google_chat_notification
+    def dispatch_google_chat_notification(
+        notification_message: str
+    ) -> dict:
+        """Dispatches a notification message to the Google Chat space webhook to inform the SecOps team.
+
+        Args:
+            notification_message: Formatted text or markdown notification to broadcast to the Google Chat space.
+        """
+        agent_state["chat_msg_text"] = notification_message
+        if not chat_webhook_url or not chat_webhook_url.strip():
+            logger.info("ADK Tool [dispatch_google_chat_notification]: Chat webhook URL not set; skipped.")
+            return {"status": "SKIPPED", "reason": "No webhook URL provided"}
+
+        notify_google_chat(chat_webhook_url, notification_message)
+        agent_state["chat_notified"] = True
+        logger.info("ADK Tool [dispatch_google_chat_notification]: Dispatched to Google Chat.")
+        return {"status": "SUCCESS", "message": "Notification dispatched to Google Chat space."}
+
+    agent_instruction = (
+        "You are an autonomous Principal SecOps & GitOps Remediation Agent powered by Google ADK (Agent Development Kit).\n"
+        "Your mission is to take an approved Security Command Center (SCC) remediation strategy and "
+        "execute the end-to-end GitOps remediation workflow using your provided tools.\n\n"
+        "STRICT EXECUTION ORDER:\n"
+        "1. Write complete, syntactically valid Terraform (HCL) code implementing the selected remediation option.\n"
+        "   - Use official `google` provider resources.\n"
+        "   - Do NOT use dummy pseudocode or incomplete placeholders.\n"
+        "   - Add explanatory comments for each security setting.\n"
+        "2. Call `validate_terraform_code` to verify the HCL syntax and structural integrity.\n"
+        "3. Call `create_github_pull_request_tool` to commit the code onto a dedicated branch and open a PR.\n"
+        "4. Call `record_remediation_audit` to write the full audit trail and PR metadata to Firestore.\n"
+        "5. Call `dispatch_google_chat_notification` to notify the team in Google Chat with the PR link and human review safety assurance (the code is staged in Git and has NOT been applied to live infrastructure).\n"
+        "6. Provide a concise technical summary of the completed remediation."
+    )
+
+    remediation_agent = Agent(
+        name="scc_remediation_agent",
+        model=model_name,
+        instruction=agent_instruction,
+        tools=[
+            validate_terraform_code,
+            create_github_pull_request_tool,
+            record_remediation_audit,
+            dispatch_google_chat_notification
+        ]
+    )
+
+    runner = Runner(
+        agent=remediation_agent,
+        app_name="cloudguard_remediation",
+        session_service=InMemorySessionService(),
+        auto_create_session=True
+    )
+
+    user_prompt = f"""
+Execute automated GitOps remediation for the following Security Command Center finding:
+
+[Finding Details]
+- Finding Category: {issue_type}
+- Resource Name: {resource_name}
+- Finding ID: {finding_id}
+- Description: {description}
+- Next Steps: {next_steps}
+- Source Properties: {json.dumps(source_properties, default=str)}
+
+[Selected Remediation Strategy]
+- Option Number: {target_num}
+- Title: {selected_option.get("title", f"Option {target_num}")}
+- Strategy: {selected_option.get("strategy", "")}
+- Operational Considerations: {selected_option.get("trade_offs") or selected_option.get("explanation", "")}
+
+[Repository Context]
+- Target GitHub Repository: {github_repo}
+- Base Branch: {github_base_branch}
+- Target File Path: remediations/{sanitize_doc_id(issue_type).lower()}_{sanitize_doc_id(resource_name.split('/')[-1]).lower()}.tf
+
+Execute the required steps using your tools now.
+"""
+
+    session_id = f"remediate_{sanitize_doc_id(resource_name)}_{int(time.time()*1000)}"
+    content = types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])
+
+    logger.info(f"Running ADK Remediation Agent for finding: {issue_type} on {resource_name}")
+    raw_output_parts = []
+    for event in runner.run(user_id="scc_pipeline", session_id=session_id, new_message=content):
+        if event.message and event.message.parts:
+            for part in event.message.parts:
+                if getattr(part, "text", None):
+                    raw_output_parts.append(part.text)
+
+    raw_response_text = "\n".join(raw_output_parts)
+    logger.info(f"ADK Remediation Agent execution finished. Output length: {len(raw_response_text)} chars.")
+
+    # Validation: Ensure agent fulfilled zero-fallback requirement
+    if not agent_state.get("terraform_code"):
+        raise RuntimeError(
+            f"ADK Remediation Agent failed to generate and validate Terraform HCL code for {issue_type}. "
+            f"Zero fallback policy enforced. Raw output: {raw_response_text[:300]}"
+        )
+
+    # Guarantee audit recording if tool step was skipped by model
+    if not agent_state.get("audit_result"):
+        record_remediation_audit("PR_OPENED_NOT_APPLIED", "Autonomous audit recorded via remediation pipeline.")
+
+    # Guarantee chat notification if tool step was skipped by model
+    pr_res = agent_state.get("pr_result") or {}
+    pr_success = bool(pr_res.get("success"))
+    pr_url = pr_res.get("pr_url")
+    pr_number = pr_res.get("pr_number")
+    branch_name = pr_res.get("branch_name")
+    file_path = pr_res.get("file_path")
+
+    if not agent_state.get("chat_msg_text"):
+        if pr_success and pr_url:
+            chat_msg = (
+                f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
+                f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
+                f"🌿 *Branch:* `{branch_name}`\n"
+                f"📁 *File:* `{file_path}`\n\n"
+                f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
+                f"It *has NOT been applied* to live infrastructure."
+            )
+        else:
+            chat_msg = (
+                f"✅ *Terraform Fix Prepared!*\n\n"
+                f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
+            )
+        agent_state["chat_msg_text"] = chat_msg
+        if not agent_state.get("chat_notified") and chat_webhook_url:
+            notify_google_chat(chat_webhook_url, chat_msg)
+            agent_state["chat_notified"] = True
+
+    if not agent_state.get("explanation"):
+        agent_state["explanation"] = raw_response_text or f"Autonomous Terraform remediation implementing Option {target_num}: {selected_option.get('title')}."
+
+    return agent_state
 
 
 # -----------------------------------------------------------------------------
@@ -1223,7 +1368,7 @@ def render_loading_html_page(
                 <div id="progress-bar" class="progress-bar"></div>
             </div>
             <div class="status-indicator">
-                <span id="progress-status-text">Invoking Vertex AI Gemini Agent...</span>
+                <span id="progress-status-text">Invoking Google ADK Remediation Agent (Autonomous Multi-Tool Pipeline)...</span>
                 <span id="elapsed-time">Elapsed: 0s</span>
             </div>
 
@@ -1238,29 +1383,29 @@ def render_loading_html_page(
                 <div id="step-2" class="step-item active">
                     <div class="step-icon"><span class="step-spinner"></span></div>
                     <div class="step-content">
-                        <div class="step-title">2. Vertex AI Gemini 2.5 Agent Synthesis</div>
-                        <div id="step-2-subtext" class="step-subtext">Reasoning over Google Cloud provider HCL & security boundaries...</div>
+                        <div class="step-title">2. Google ADK Agent Reasoning & Tool Execution</div>
+                        <div id="step-2-subtext" class="step-subtext">Autonomous agent reasoning over HCL, validating syntax, and invoking tools...</div>
                     </div>
                 </div>
                 <div id="step-3" class="step-item pending">
                     <div class="step-icon">3</div>
                     <div class="step-content">
-                        <div class="step-title">3. GitOps Branching & Code Staging</div>
-                        <div id="step-3-subtext" class="step-subtext">Awaiting synthesized Terraform configuration...</div>
+                        <div class="step-title">3. Tool: validate_terraform_code & GitOps Staging</div>
+                        <div id="step-3-subtext" class="step-subtext">Validating structural HCL compliance and syntax rules...</div>
                     </div>
                 </div>
                 <div id="step-4" class="step-item pending">
                     <div class="step-icon">4</div>
                     <div class="step-content">
-                        <div class="step-title">4. GitHub Pull Request Creation</div>
-                        <div id="step-4-subtext" class="step-subtext">Opening PR for human-in-the-loop review...</div>
+                        <div class="step-title">4. Tool: create_github_pull_request_tool</div>
+                        <div id="step-4-subtext" class="step-subtext">Opening GitHub PR for human-in-the-loop review...</div>
                     </div>
                 </div>
                 <div id="step-5" class="step-item pending">
                     <div class="step-icon">5</div>
                     <div class="step-content">
-                        <div class="step-title">5. SecOps Audit Trail & Google Chat Notification</div>
-                        <div id="step-5-subtext" class="step-subtext">Posting confirmation card to Google Chat space...</div>
+                        <div class="step-title">5. Tools: record_remediation_audit & dispatch_google_chat_notification</div>
+                        <div id="step-5-subtext" class="step-subtext">Writing audit trail to Firestore & posting confirmation to Google Chat...</div>
                     </div>
                 </div>
             </div>
@@ -1797,115 +1942,40 @@ def _handle_chat_webhook_impl(request):
             )
 
         logger.info(
-            f"Invoking Terraform Remediation Agent for finding '{finding_key}' "
+            f"Invoking Autonomous Google ADK Remediation Agent for finding '{finding_key}' "
             f"using Option {target_num}: '{selected_option.get('title')}'"
         )
 
-        agent_result = run_terraform_coding_agent(
-            finding_data=alert_data,
+        agent_result = run_scc_remediation_agent(
+            alert_doc_ref=doc_ref,
+            alert_data=alert_data,
+            finding_id=finding_key,
+            issue_type=issue_type,
+            resource_name=resource_name,
             selected_option=selected_option,
+            target_num=target_num,
+            user_text=user_text,
             project_id=PROJECT_ID,
             location=VERTEX_LOCATION,
-            model_name=VERTEX_MODEL
+            model_name=VERTEX_MODEL,
+            github_repo=GITHUB_REPO,
+            github_token=GITHUB_TOKEN,
+            github_base_branch=GITHUB_BASE_BRANCH,
+            chat_webhook_url=GOOGLE_CHAT_WEBHOOK_URL
         )
 
         tf_code = agent_result.get("terraform_code", "")
         explanation = agent_result.get("explanation", "")
-        prerequisites = agent_result.get("prerequisites", [])
-        execution_instructions = agent_result.get("execution_instructions", "")
-
-        # ---------------------------------------------------------------------
-        # Approach 1: Deterministic GitHub Automation (Branch -> Commit -> PR)
-        # ---------------------------------------------------------------------
-        pr_result: Dict[str, Any] = {}
-        if GITHUB_TOKEN and GITHUB_REPO:
-            logger.info(f"Opening GitHub Pull Request in '{GITHUB_REPO}' for finding '{finding_key}'...")
-            pr_result = create_github_pull_request(
-                repo=GITHUB_REPO,
-                token=GITHUB_TOKEN,
-                base_branch=GITHUB_BASE_BRANCH,
-                issue_type=issue_type,
-                resource_name=resource_name,
-                finding_id=finding_key,
-                option_number=target_num,
-                option_title=selected_option.get("title", f"Option {target_num}"),
-                option_strategy=selected_option.get("strategy", ""),
-                terraform_code=tf_code,
-                explanation=explanation,
-                execution_instructions=execution_instructions,
-            )
-            logger.info(f"GitHub PR creation result: {pr_result.get('success')} (PR: {pr_result.get('pr_url')})")
-        else:
-            logger.info("GITHUB_TOKEN or GITHUB_REPO not configured. Staging only in Firestore.")
-
+        pr_result = agent_result.get("pr_result") or {}
         pr_success = bool(pr_result.get("success"))
         pr_url = pr_result.get("pr_url")
         pr_number = pr_result.get("pr_number")
         branch_name = pr_result.get("branch_name")
         file_path = pr_result.get("file_path")
+        chat_msg_text = agent_result.get("chat_msg_text", "")
 
-        remediation_record = {
-            "finding_id": finding_key,
-            "issue_type": issue_type,
-            "resource_name": resource_name,
-            "selected_option": {
-                "option_number": target_num,
-                "title": selected_option.get("title"),
-                "strategy": selected_option.get("strategy")
-            },
-            "status": "PR_OPENED_NOT_APPLIED" if pr_success else "CODE_GENERATED_STAGED",
-            "terraform_code": tf_code,
-            "explanation": explanation,
-            "prerequisites": prerequisites,
-            "execution_instructions": execution_instructions,
-            "user_response_text": user_text or f"Option {target_num}",
-            "generated_at": firestore.SERVER_TIMESTAMP
-        }
-
-        if pr_success:
-            remediation_record["github_pr"] = {
-                "pr_url": pr_url,
-                "pr_number": pr_number,
-                "branch_name": branch_name,
-                "file_path": file_path,
-                "status": "OPEN",
-                "created_at": firestore.SERVER_TIMESTAMP
-            }
-        elif pr_result.get("error"):
-            remediation_record["github_pr_error"] = pr_result.get("error")
-
-        # Update alert doc
-        doc_ref.update({
-            "user_response": {
-                "decision": "REMEDIATE",
-                "chosen_option": target_num,
-                "raw_text": user_text or f"Option {target_num}",
-                "decided_at": firestore.SERVER_TIMESTAMP
-            },
-            "remediation": remediation_record,
-            "remediation_status": "PR_OPENED" if pr_success else "CODE_GENERATED_STAGED"
-        })
-
-        db = get_firestore_client()
-        db.collection("remediations").document(f"{issue_type}_{finding_key}").set(remediation_record)
-
-        logger.info(
-            f"Remediation processed for '{finding_key}'. Status: {remediation_record['status']}. "
-            f"Length: {len(tf_code)} chars."
-        )
-
-        # Build notification for Google Chat and HTML UI
+        # Build notification details for HTML UI
         if pr_success and pr_url:
-            chat_msg_text = (
-                f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
-                f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
-                f"🌿 *Branch:* `{branch_name}`\n"
-                f"📁 *File:* `{file_path}`\n\n"
-                f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
-                f"It *has NOT been applied* to live infrastructure."
-            )
             details_list = [
                 f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
                 f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
@@ -1916,12 +1986,6 @@ def _handle_chat_webhook_impl(request):
             ]
             heading_text = f"Pull Request Opened: #{pr_number}"
         else:
-            chat_msg_text = (
-                f"✅ *Terraform Fix Prepared!*\n\n"
-                f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
-            )
             details_list = [
                 f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
                 f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
@@ -1931,8 +1995,6 @@ def _handle_chat_webhook_impl(request):
             if pr_result.get("error"):
                 details_list.append(f"<strong>GitHub Status:</strong> ⚠️ PR creation issue: {html.escape(str(pr_result.get('error')))}")
             heading_text = f"Remediation Generated: {selected_option.get('title')}"
-
-        notify_google_chat(GOOGLE_CHAT_WEBHOOK_URL, chat_msg_text)
 
         if wants_html:
             return (

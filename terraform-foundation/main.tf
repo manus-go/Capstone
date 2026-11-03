@@ -454,8 +454,9 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
   service_config {
     max_instance_count    = 5
     min_instance_count    = 0
-    available_memory      = "512M"
-    timeout_seconds       = 120
+    available_memory      = "1024M"
+    available_cpu         = "1"
+    timeout_seconds       = 180
     service_account_email = google_service_account.alert_router.email
     environment_variables = {
       PROJECT_ID               = var.project_id
@@ -463,6 +464,9 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
       VERTEX_AI_MODEL          = var.vertex_ai_model
       GOOGLE_CHAT_WEBHOOK_URL  = var.google_chat_webhook_url
       REMEDIATION_RECEIVER_URL = google_cloudfunctions2_function.scc_remediation_receiver.service_config[0].uri
+      GOOGLE_GENAI_USE_VERTEXAI = "TRUE"
+      GOOGLE_CLOUD_PROJECT     = var.project_id
+      GOOGLE_CLOUD_LOCATION    = var.vertex_ai_location
     }
   }
 
@@ -515,8 +519,9 @@ resource "google_cloudfunctions2_function" "scc_remediation_receiver" {
   service_config {
     max_instance_count    = 5
     min_instance_count    = 0
-    available_memory      = "512M"
-    timeout_seconds       = 180
+    available_memory      = "1024M"
+    available_cpu         = "1"
+    timeout_seconds       = 240
     service_account_email = google_service_account.alert_router.email
     environment_variables = {
       PROJECT_ID              = var.project_id
@@ -526,6 +531,9 @@ resource "google_cloudfunctions2_function" "scc_remediation_receiver" {
       GITHUB_TOKEN            = var.github_token
       GITHUB_REPO             = var.github_repo
       GITHUB_BASE_BRANCH      = var.github_base_branch
+      GOOGLE_GENAI_USE_VERTEXAI = "TRUE"
+      GOOGLE_CLOUD_PROJECT     = var.project_id
+      GOOGLE_CLOUD_LOCATION    = var.vertex_ai_location
     }
   }
 

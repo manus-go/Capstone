@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import time
 import traceback
 import urllib.parse
 from datetime import datetime, timezone
@@ -12,6 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import functions_framework
 import requests
 from google.cloud import firestore
+from google.adk.agents import Agent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 
 # -----------------------------------------------------------------------------
 # Environment Loader
@@ -76,12 +81,13 @@ def sanitize_doc_id(raw_id: str) -> str:
     return sanitized[:200]
 
 
-def call_vertex_ai(payload: dict, project_id: str, location: str, model_name: str) -> dict:
+def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_name: str) -> dict:
     """
-    Invokes Vertex AI Gemini model to:
-    1. Write an issue summary.
-    2. Generate Terraform remediation options (avoiding imperative gcloud commands).
-    3. Explicitly state which fix option it thinks is best and why.
+    Invokes the Google Agent Development Kit (ADK) autonomous Triage Agent equipped with
+    the `publish_triage_assessment` tool to:
+    1. Write a technical issue summary.
+    2. Formulate declarative Terraform remediation options (strictly avoiding CLI commands).
+    3. Determine and justify the objectively best fix option.
     """
     finding = payload.get("finding", {})
     if not isinstance(finding, dict):
@@ -109,7 +115,59 @@ def call_vertex_ai(payload: dict, project_id: str, location: str, model_name: st
     source_properties = finding.get("sourceProperties", {})
     next_steps = finding.get("nextSteps", "")
 
-    system_instruction = (
+    # Configure Vertex AI backend for ADK
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+    os.environ["GOOGLE_CLOUD_LOCATION"] = location
+
+    triage_result: Dict[str, Any] = {}
+
+    def publish_triage_assessment(
+        issue_summary: str,
+        option_1_title: str,
+        option_1_strategy: str,
+        option_1_trade_offs: str,
+        option_2_title: str,
+        option_2_strategy: str,
+        option_2_trade_offs: str,
+        best_option_title: str,
+        best_option_reasoning: str
+    ) -> dict:
+        """Publishes the structured triage assessment and Terraform remediation options for the security finding.
+
+        Args:
+            issue_summary: Concise 2-3 sentence technical overview of the vulnerability, affected resource, and exploit/breach risk.
+            option_1_title: Clear descriptive name for the primary Terraform remediation strategy.
+            option_1_strategy: Description of the architectural and policy configuration changes in Terraform (no CLI commands or raw code blocks).
+            option_1_trade_offs: Operational considerations, pros/cons, and impact on workload or connectivity.
+            option_2_title: Alternative Terraform remediation strategy name.
+            option_2_strategy: Alternative approach describing the policy or configuration changes in Terraform (no CLI commands or raw code blocks).
+            option_2_trade_offs: Operational considerations, pros/cons, and comparison to Option 1.
+            best_option_title: Exact title of the fix option considered best.
+            best_option_reasoning: Detailed justification explaining why this option is objectively superior.
+        """
+        triage_result["issue_summary"] = issue_summary
+        triage_result["fix_options"] = [
+            {
+                "option_number": 1,
+                "title": option_1_title,
+                "strategy": option_1_strategy,
+                "trade_offs": option_1_trade_offs
+            },
+            {
+                "option_number": 2,
+                "title": option_2_title,
+                "strategy": option_2_strategy,
+                "trade_offs": option_2_trade_offs
+            }
+        ]
+        triage_result["best_option"] = {
+            "recommended_title": best_option_title,
+            "reasoning": best_option_reasoning
+        }
+        return {"status": "published", "title": best_option_title}
+
+    agent_instruction = (
         "You are an elite Principal Cloud Security Architect specializing in Infrastructure as Code (Terraform) on Google Cloud Platform.\n"
         "Your role is to analyze Google Cloud Security Command Center (SCC) findings and formulate "
         "declarative Infrastructure-as-Code (Terraform) remediation strategies for platform and security engineering teams.\n\n"
@@ -120,7 +178,24 @@ def call_vertex_ai(payload: dict, project_id: str, location: str, model_name: st
         "(such as `gcloud`, `gsutil`, `bq`, `kubectl`, or shell scripts).\n"
         "3. In the fix option descriptions and summaries, describe what the architectural and policy changes do in clear, high-level technical terms. "
         "Do NOT include code snippets, backtick code fences, or raw Terraform HCL syntax.\n"
-        "4. Explicitly recommend which Terraform fix option is best and provide rigorous security, operational, and architectural reasoning."
+        "4. Explicitly recommend which Terraform fix option is best and provide rigorous security, operational, and architectural reasoning.\n"
+        "5. You MUST call the `publish_triage_assessment` tool to deliver your structured findings.\n"
+        "6. No fallbacks: perform precise and authoritative analysis."
+    )
+
+    triage_agent = Agent(
+        name="scc_triage_agent",
+        model=model_name,
+        instruction=agent_instruction,
+        tools=[publish_triage_assessment]
+    )
+
+    session_service = InMemorySessionService()
+    runner = Runner(
+        agent=triage_agent,
+        app_name="cloudguard_triage",
+        session_service=session_service,
+        auto_create_session=True
     )
 
     user_prompt = f"""
@@ -134,156 +209,30 @@ Analyze the following Google Cloud Security Command Center (SCC) finding:
 - SCC Next Steps Guidance: {next_steps}
 - Source Properties: {json.dumps(source_properties, default=str)}
 
-Respond strictly in JSON matching this exact structure:
-{{
-  "issue_summary": "Concise 2-3 sentence technical overview of the vulnerability, affected resource, and exploit/breach risk.",
-  "fix_options": [
-    {{
-      "option_number": 1,
-      "title": "Clear descriptive name for this Terraform remediation strategy",
-      "strategy": "Concise summary of what architectural and policy configuration changes will be made in the Terraform configuration (no code or CLI commands)",
-      "trade_offs": "Operational considerations, pros/cons, and impact on workload or connectivity"
-    }},
-    {{
-      "option_number": 2,
-      "title": "Alternative Terraform remediation strategy name",
-      "strategy": "Alternative approach describing the policy/configuration changes to be enforced in Terraform (no code or CLI commands)",
-      "trade_offs": "Operational considerations, pros/cons, and comparison to Option 1"
-    }}
-  ],
-  "best_option": {{
-    "recommended_title": "Exact title of the fix option you consider best",
-    "reasoning": "Detailed justification explaining why this option is objectively superior (e.g. least privilege, blast-radius containment, defense-in-depth, operational simplicity)."
-  }}
-}}
+Execute the publish_triage_assessment tool with your analysis.
 """
 
-    raw_response_text = ""
+    session_id = f"triage_{sanitize_doc_id(resource_name)}_{int(time.time()*1000)}"
+    content = types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])
 
-    # Attempt 1: Vertex AI SDK
-    try:
-        import vertexai
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
+    logger.info(f"Running ADK Triage Agent for finding: {issue_type} on {resource_name}")
+    raw_output_parts = []
+    for event in runner.run(user_id="scc_pipeline", session_id=session_id, new_message=content):
+        if event.message and event.message.parts:
+            for part in event.message.parts:
+                if getattr(part, "text", None):
+                    raw_output_parts.append(part.text)
 
-        vertexai.init(project=project_id, location=location)
-        model = GenerativeModel(
-            model_name=model_name,
-            system_instruction=[system_instruction],
+    raw_response_text = "\n".join(raw_output_parts)
+    if not triage_result:
+        raise RuntimeError(
+            f"ADK Triage Agent completed without publishing triage assessment for {issue_type} on {resource_name}. "
+            f"Raw output: {raw_response_text[:300]}"
         )
-        try:
-            gen_config = GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
-                max_output_tokens=8192,
-                thinking_config={"thinking_budget": 1024}
-            )
-        except Exception:
-            gen_config = GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
-                max_output_tokens=8192,
-            )
-        response = model.generate_content(user_prompt, generation_config=gen_config)
-        raw_response_text = response.text
-        print(f"Vertex AI response received via SDK ({len(raw_response_text)} chars)", flush=True)
-    except Exception as sdk_err:
-        print(f"Vertex AI SDK call issue: {sdk_err}", file=sys.stderr, flush=True)
-        traceback.print_exc(file=sys.stderr)
-        sys.stderr.flush()
 
-    # Attempt 2: Direct Vertex AI REST API (fallback)
-    if not raw_response_text:
-        try:
-            import google.auth
-            from google.auth.transport.requests import Request as AuthRequest
-
-            creds, _ = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )
-            creds.refresh(AuthRequest())
-
-            rest_url = (
-                f"https://{location}-aiplatform.googleapis.com/v1/"
-                f"projects/{project_id}/locations/{location}/publishers/google/models/{model_name}:generateContent"
-            )
-            body = {
-                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                "systemInstruction": {"parts": [{"text": system_instruction}]},
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.2,
-                    "maxOutputTokens": 8192,
-                    "thinkingConfig": {
-                        "thinkingBudget": 1024
-                    }
-                },
-            }
-            req_headers = {
-                "Authorization": f"Bearer {creds.token}",
-                "Content-Type": "application/json",
-            }
-            res = requests.post(rest_url, json=body, headers=req_headers, timeout=45)
-            if not res.ok:
-                print(f"Vertex AI REST error: status={res.status_code}, response={res.text}", file=sys.stderr, flush=True)
-            res.raise_for_status()
-            res_json = res.json()
-            raw_response_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
-            print(f"Vertex AI response received via REST API ({len(raw_response_text)} chars)", flush=True)
-        except Exception as rest_err:
-            print(f"Vertex AI REST exception: {rest_err}", file=sys.stderr, flush=True)
-            traceback.print_exc(file=sys.stderr)
-            sys.stderr.flush()
-
-    # Parse JSON structure
-    parsed_analysis = None
-    if raw_response_text:
-        text_to_parse = raw_response_text.strip()
-        # Strip markdown code fences if wrapped by the model
-        if text_to_parse.startswith("```"):
-            text_to_parse = re.sub(r"^```[a-zA-Z]*\n?", "", text_to_parse)
-            text_to_parse = re.sub(r"\n?```$", "", text_to_parse).strip()
-
-        try:
-            parsed_analysis = json.loads(text_to_parse)
-        except Exception as json_err:
-            # Fallback regex extraction if model returned wrapped markdown block
-            match = re.search(r"\{.*\}", text_to_parse, re.DOTALL)
-            if match:
-                try:
-                    parsed_analysis = json.loads(match.group(0))
-                except Exception:
-                    pass
-
-    # Safety fallback if model was unreachable or malformed
-    if not parsed_analysis or not isinstance(parsed_analysis, dict):
-        logger.warning("Using rule-based fallback analysis structure.")
-        parsed_analysis = {
-            "issue_summary": (
-                f"Security finding '{issue_type}' with severity '{severity}' detected on resource '{resource_name}'. "
-                f"{description}"
-            ),
-            "fix_options": [
-                {
-                    "option_number": 1,
-                    "title": "Least-Privilege Access Restriction",
-                    "strategy": "Remove public/unrestricted permissions and restrict access exclusively to authorized identities or networks.",
-                    "trade_offs": "Requires maintaining an inventory of authorized caller identities or CIDR blocks."
-                },
-                {
-                    "option_number": 2,
-                    "title": "Private Resource Isolation",
-                    "strategy": "Migrate resource entirely behind private networking or VPC Service Controls, eliminating public internet exposure.",
-                    "trade_offs": "Provides defense-in-depth and eliminates external attack surface; requires internal routing or VPC peering."
-                }
-            ],
-            "best_option": {
-                "recommended_title": "Private Resource Isolation",
-                "reasoning": "Completely removes the resource from the public internet, enforcing zero trust and defense-in-depth."
-            }
-        }
-
-    parsed_analysis["raw_output"] = raw_response_text
-    return parsed_analysis
+    triage_result["raw_output"] = raw_response_text
+    logger.info(f"ADK Triage Agent completed successfully. Recommended: {triage_result.get('best_option', {}).get('recommended_title')}")
+    return triage_result
 
 
 def build_google_chat_payload(
@@ -493,27 +442,46 @@ def build_google_chat_payload(
 def dispatch_to_google_chat(webhook_url: str, payload: dict, fallback_text: Optional[str] = None) -> tuple[str, str]:
     """
     Sends the formatted Card V2 message to Google Chat via Incoming Webhook.
-    If the card payload fails, falls back to plain-text markdown.
+    Retries transient 5xx errors so the sleek interactive card is prioritized.
+    If the card payload fails after retries, falls back to plain-text markdown.
     Returns (status, details).
     """
     if not webhook_url or not webhook_url.strip():
         logger.info("GOOGLE_CHAT_WEBHOOK_URL is not configured. Notification dispatch skipped.")
         return ("SKIPPED_NOT_CONFIGURED", "Webhook URL empty or not set in environment.")
 
-    try:
-        resp = requests.post(
-            webhook_url.strip(),
-            json=payload,
-            headers={"Content-Type": "application/json; charset=UTF-8"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            logger.info("Successfully dispatched alert card to Google Chat!")
-            return ("SUCCESS", "Card posted to Google Chat successfully.")
+    last_error = ""
+    # Attempt card dispatch with retry for transient webhook/server issues
+    for attempt in range(1, 3):
+        try:
+            resp = requests.post(
+                webhook_url.strip(),
+                json=payload,
+                headers={"Content-Type": "application/json; charset=UTF-8"},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                logger.info(f"Successfully dispatched alert card to Google Chat (attempt {attempt})!")
+                return ("SUCCESS", "Card posted to Google Chat successfully.")
 
-        # If card posting failed and fallback text is provided, attempt fallback
-        if fallback_text:
-            logger.warning(f"Card post rejected (HTTP {resp.status_code}): {resp.text[:200]}. Attempting plain-text fallback...")
+            last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            logger.warning(f"Card post attempt {attempt} failed ({last_error}). Retrying...")
+            if resp.status_code >= 500 and attempt < 2:
+                time.sleep(2)
+                continue
+            break
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Card post attempt {attempt} encountered exception: {e}")
+            if attempt < 2:
+                time.sleep(2)
+                continue
+            break
+
+    # If card posting failed after retries and fallback text is provided, attempt fallback
+    if fallback_text:
+        logger.warning(f"Card post failed ({last_error}). Attempting plain-text fallback as backup...")
+        try:
             fallback_resp = requests.post(
                 webhook_url.strip(),
                 json={"text": fallback_text},
@@ -523,14 +491,11 @@ def dispatch_to_google_chat(webhook_url: str, payload: dict, fallback_text: Opti
             if fallback_resp.status_code == 200:
                 logger.info("Successfully dispatched plain-text fallback to Google Chat!")
                 return ("SUCCESS_FALLBACK_TEXT", "Card rejected; fallback plain text posted.")
+        except Exception as e:
+            logger.error(f"Fallback plain-text post also failed: {e}")
 
-        err_msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
-        logger.error(f"Failed to post to Google Chat webhook: {err_msg}")
-        return ("FAILED", err_msg)
-    except Exception as e:
-        err_msg = f"Exception during Google Chat post: {str(e)}"
-        logger.error(err_msg)
-        return ("ERROR", err_msg)
+    logger.error(f"Failed to post to Google Chat webhook: {last_error}")
+    return ("FAILED", last_error)
 
 
 @functions_framework.cloud_event
@@ -671,9 +636,9 @@ def process_scc_alert(cloud_event):
         alert_ref.set(alert_record)
         return (json.dumps({"status": "ignored", "alert_id": alert_doc_id}), 200)
 
-    # Step 3: Enriched Workflow for NOTIFIED Findings
-    logger.info(f"Generating Vertex AI analysis for NOTIFIED finding: {issue_type}")
-    ai_analysis = call_vertex_ai(
+    # Step 3: Enriched Workflow for NOTIFIED Findings via ADK Triage Agent
+    logger.info(f"Generating ADK Triage Agent analysis for NOTIFIED finding: {issue_type}")
+    ai_analysis = run_scc_triage_agent(
         payload=payload,
         project_id=project_id,
         location=vertex_location,
