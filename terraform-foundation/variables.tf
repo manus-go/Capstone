@@ -1,7 +1,6 @@
 variable "project_id" {
-  description = "The Google Cloud Project ID where Pub/Sub resources will be provisioned."
+  description = "The Google Cloud Project ID where resources will be provisioned."
   type        = string
-  default     = "go-capstone-manus"
 }
 
 variable "region" {
@@ -93,7 +92,6 @@ variable "github_token" {
 variable "github_repo" {
   description = "GitHub repository in 'owner/repo' format where remediation PRs should be submitted."
   type        = string
-  default     = "manus-go/Capstone"
 }
 
 variable "github_base_branch" {

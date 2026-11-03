@@ -17,6 +17,13 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+# Environment & Secret files
+.env
+.env.*
+*.env
+!*.env.example
+!.env.example
+
 # Local binaries and tooling
 bin/
 

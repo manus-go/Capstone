@@ -14,6 +14,40 @@ from google.cloud import firestore
 import requests
 
 # -----------------------------------------------------------------------------
+# Environment Loader
+# -----------------------------------------------------------------------------
+def load_env_file():
+    """Loads environment variables from .env if present without overwriting existing vars."""
+    search_dirs = [
+        os.getcwd(),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ]
+    for directory in search_dirs:
+        env_file = os.path.join(directory, ".env")
+        if os.path.isfile(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if line.startswith("export "):
+                            line = line[7:].strip()
+                        if "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+            break
+
+load_env_file()
+
+# -----------------------------------------------------------------------------
 # Logging Setup
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -22,12 +56,12 @@ logger = logging.getLogger("scc-remediation-receiver")
 # -----------------------------------------------------------------------------
 # Configuration from Environment
 # -----------------------------------------------------------------------------
-PROJECT_ID = os.environ.get("PROJECT_ID", "go-capstone-manus")
+PROJECT_ID = os.environ.get("PROJECT_ID", "")
 VERTEX_LOCATION = os.environ.get("VERTEX_AI_LOCATION", "europe-west2")
 VERTEX_MODEL = os.environ.get("VERTEX_AI_MODEL", "gemini-2.5-flash")
 GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "manus-go/Capstone")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 GITHUB_BASE_BRANCH = os.environ.get("GITHUB_BASE_BRANCH", "main")
 
 # Lazy-loaded Firestore client
@@ -39,6 +73,11 @@ def get_firestore_client() -> firestore.Client:
     if _db is None:
         _db = firestore.Client(project=PROJECT_ID)
     return _db
+
+
+def safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Safely serializes objects to JSON, handling Firestore timestamps and non-serializable objects."""
+    return json.dumps(obj, default=str, **kwargs)
 
 
 # -----------------------------------------------------------------------------
@@ -256,11 +295,19 @@ Respond strictly with valid JSON matching the requested schema.
             model_name=model_name,
             system_instruction=[system_instruction],
         )
-        gen_config = GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-            max_output_tokens=8192,
-        )
+        try:
+            gen_config = GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                max_output_tokens=16384,
+                thinking_config={"thinking_budget": 1024}
+            )
+        except Exception:
+            gen_config = GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                max_output_tokens=16384,
+            )
         response = model.generate_content(user_prompt, generation_config=gen_config)
         raw_response = response.text
         logger.info(f"Remediation Agent response received via SDK ({len(raw_response)} chars)")
@@ -286,7 +333,10 @@ Respond strictly with valid JSON matching the requested schema.
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "temperature": 0.1,
-                    "maxOutputTokens": 8192,
+                    "maxOutputTokens": 16384,
+                    "thinkingConfig": {
+                        "thinkingBudget": 1024
+                    }
                 },
             }
             headers = {
@@ -316,6 +366,21 @@ Respond strictly with valid JSON matching the requested schema.
             if match:
                 try:
                     parsed_code_data = json.loads(match.group(0))
+                except Exception:
+                    pass
+
+        # Fallback regex extraction if full JSON parsing failed but terraform_code exists
+        if not parsed_code_data or not parsed_code_data.get("terraform_code"):
+            tf_match = re.search(r'"terraform_code"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned_text, re.DOTALL)
+            if tf_match:
+                try:
+                    code_val = json.loads(f'"{tf_match.group(1)}"')
+                    parsed_code_data = {
+                        "terraform_code": code_val,
+                        "explanation": f"Automated Terraform remediation implementing: {opt_title}.",
+                        "prerequisites": ["google provider >= 5.0.0"],
+                        "execution_instructions": "1. terraform init\n2. terraform plan\n3. terraform apply"
+                    }
                 except Exception:
                     pass
 
@@ -749,6 +814,678 @@ def render_html_page(
 """
 
 
+# -----------------------------------------------------------------------------
+# HTML Loading Page Renderer (Fast Real-Time Browser Feedback)
+# -----------------------------------------------------------------------------
+def render_loading_html_page(
+    finding_id: str,
+    issue_type: str,
+    resource_name: str,
+    option_number: int,
+    option_title: str,
+    option_strategy: str
+) -> str:
+    escaped_finding = html.escape(finding_id)
+    escaped_issue = html.escape(issue_type)
+    escaped_resource = html.escape(resource_name)
+    escaped_title = html.escape(option_title)
+    escaped_strategy = html.escape(option_strategy)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remediating {escaped_issue} | CloudGuard SecOps</title>
+    <style>
+        :root {{
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-red: #f85149;
+        }}
+        * {{
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }}
+        .card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            max-width: 860px;
+            width: 100%;
+            padding: 32px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        }}
+        .badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 16px;
+        }}
+        .pulse-badge {{
+            background-color: rgba(56, 139, 253, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(56, 139, 253, 0.4);
+        }}
+        .success-badge {{
+            background-color: rgba(63, 185, 80, 0.15);
+            color: var(--accent-green);
+            border: 1px solid rgba(63, 185, 80, 0.4);
+        }}
+        .error-badge {{
+            background-color: rgba(248, 81, 73, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(248, 81, 73, 0.4);
+        }}
+        h2 {{
+            margin: 0 0 8px 0;
+            font-size: 24px;
+            color: #ffffff;
+        }}
+        .subtitle {{
+            color: var(--text-secondary);
+            font-size: 15px;
+            margin-bottom: 24px;
+            line-height: 1.4;
+        }}
+        .info-card {{
+            background-color: #1f242c;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-bottom: 24px;
+        }}
+        .info-row {{
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            padding: 6px 0;
+            border-bottom: 1px solid #282e38;
+            font-size: 14px;
+        }}
+        .info-row:last-child {{
+            border-bottom: none;
+        }}
+        .info-label {{
+            color: var(--text-secondary);
+            font-weight: 600;
+            min-width: 140px;
+            flex-shrink: 0;
+        }}
+        .info-value {{
+            color: var(--text-primary);
+            word-break: break-all;
+        }}
+        .info-value code {{
+            background-color: rgba(110, 118, 129, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+            font-size: 13px;
+            color: #79c0ff;
+        }}
+        .progress-container {{
+            width: 100%;
+            background-color: #21262d;
+            border-radius: 6px;
+            height: 10px;
+            overflow: hidden;
+            margin: 16px 0 10px 0;
+            border: 1px solid #30363d;
+        }}
+        .progress-bar {{
+            height: 100%;
+            width: 15%;
+            background: linear-gradient(90deg, #1f6feb, #388bfd, #2ea043);
+            border-radius: 6px;
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+        }}
+        .status-indicator {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }}
+        .pipeline-steps {{
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin: 20px 0 28px 0;
+        }}
+        .step-item {{
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+            padding: 14px 18px;
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }}
+        .step-item.active {{
+            border-color: #58a6ff;
+            background-color: rgba(56, 139, 253, 0.08);
+            box-shadow: 0 0 12px rgba(88, 166, 255, 0.15);
+        }}
+        .step-item.completed {{
+            border-color: rgba(63, 185, 80, 0.6);
+            background-color: rgba(63, 185, 80, 0.06);
+        }}
+        .step-icon {{
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            font-size: 13px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }}
+        .step-item.pending .step-icon {{
+            background-color: #21262d;
+            color: #8b949e;
+            border: 1px solid #30363d;
+        }}
+        .step-item.active .step-icon {{
+            background-color: #1f6feb;
+            color: #ffffff;
+            box-shadow: 0 0 8px rgba(31, 111, 235, 0.5);
+        }}
+        .step-item.completed .step-icon {{
+            background-color: #238636;
+            color: #ffffff;
+        }}
+        .step-content {{
+            flex-grow: 1;
+        }}
+        .step-title {{
+            font-size: 14px;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 2px;
+        }}
+        .step-subtext {{
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.4;
+        }}
+        .step-spinner {{
+            display: inline-block;
+            width: 13px;
+            height: 13px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #ffffff;
+            animation: spin 0.8s linear infinite;
+        }}
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+        .safety-banner {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background-color: #1f242c;
+            border-left: 4px solid var(--accent-green);
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }}
+        .safety-banner strong {{
+            color: var(--text-primary);
+        }}
+        .pr-button {{
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #238636;
+            color: #ffffff;
+            padding: 12px 22px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 15px;
+            box-shadow: 0 1px 0 rgba(27,31,36,0.1);
+            transition: background-color 0.2s;
+        }}
+        .pr-button:hover {{
+            background-color: #2ea043;
+            text-decoration: none;
+        }}
+        ul.details-list {{
+            list-style: none;
+            padding: 0;
+            margin: 16px 0 24px 0;
+        }}
+        ul.details-list li {{
+            padding: 8px 0;
+            color: var(--text-secondary);
+            font-size: 14px;
+            border-bottom: 1px solid #21262d;
+        }}
+        ul.details-list li strong {{
+            color: var(--text-primary);
+        }}
+        .explanation-box {{
+            background-color: #1f242c;
+            border-left: 4px solid var(--accent-blue);
+            padding: 14px 18px;
+            border-radius: 4px;
+            margin-bottom: 24px;
+        }}
+        .explanation-box h4 {{
+            margin: 0 0 6px 0;
+            color: var(--accent-blue);
+        }}
+        .explanation-box p {{
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-primary);
+        }}
+        .code-container {{
+            background-color: #0b0e14;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        }}
+        .code-header {{
+            background-color: #1f242c;
+            padding: 10px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .staged-tag {{
+            background-color: #d2992222;
+            color: #e3b341;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        .copy-btn {{
+            background-color: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+        .copy-btn:hover {{
+            background-color: #30363d;
+            color: #ffffff;
+        }}
+        pre {{
+            margin: 0;
+            padding: 16px;
+            overflow-x: auto;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #79c0ff;
+        }}
+        .footer-note {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #1f242c;
+            border: 1px solid #30363d;
+            padding: 12px 16px;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }}
+        .error-box {{
+            background-color: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 16px;
+            color: #ff7b72;
+            font-size: 14px;
+            margin: 20px 0;
+            word-break: break-all;
+        }}
+        .retry-button {{
+            background-color: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            padding: 10px 18px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+        .retry-button:hover {{
+            background-color: #30363d;
+            color: #ffffff;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <!-- LOADING VIEW -->
+        <div id="loading-view">
+            <div class="badge pulse-badge">
+                <span class="step-spinner"></span>
+                <span>Autonomous Remediation in Progress</span>
+            </div>
+            <h2>Remediating: {escaped_issue}</h2>
+            <div class="subtitle">CloudGuard SecOps AI Agent is synthesizing your fix and staging a pull request.</div>
+
+            <div class="info-card">
+                <div class="info-row">
+                    <span class="info-label">Finding ID:</span>
+                    <span class="info-value"><code>{escaped_finding}</code></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Target Resource:</span>
+                    <span class="info-value"><code>{escaped_resource}</code></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Selected Strategy:</span>
+                    <span class="info-value"><strong>Option {option_number}: {escaped_title}</strong></span>
+                </div>
+            </div>
+
+            <div class="progress-container">
+                <div id="progress-bar" class="progress-bar"></div>
+            </div>
+            <div class="status-indicator">
+                <span id="progress-status-text">Invoking Vertex AI Gemini Agent...</span>
+                <span id="elapsed-time">Elapsed: 0s</span>
+            </div>
+
+            <div class="pipeline-steps">
+                <div id="step-1" class="step-item completed">
+                    <div class="step-icon">✔</div>
+                    <div class="step-content">
+                        <div class="step-title">1. Security Finding & Policy Context Verification</div>
+                        <div id="step-1-subtext" class="step-subtext">Verified finding parameters and zero-trust policies in Firestore.</div>
+                    </div>
+                </div>
+                <div id="step-2" class="step-item active">
+                    <div class="step-icon"><span class="step-spinner"></span></div>
+                    <div class="step-content">
+                        <div class="step-title">2. Vertex AI Gemini 2.5 Agent Synthesis</div>
+                        <div id="step-2-subtext" class="step-subtext">Reasoning over Google Cloud provider HCL & security boundaries...</div>
+                    </div>
+                </div>
+                <div id="step-3" class="step-item pending">
+                    <div class="step-icon">3</div>
+                    <div class="step-content">
+                        <div class="step-title">3. GitOps Branching & Code Staging</div>
+                        <div id="step-3-subtext" class="step-subtext">Awaiting synthesized Terraform configuration...</div>
+                    </div>
+                </div>
+                <div id="step-4" class="step-item pending">
+                    <div class="step-icon">4</div>
+                    <div class="step-content">
+                        <div class="step-title">4. GitHub Pull Request Creation</div>
+                        <div id="step-4-subtext" class="step-subtext">Opening PR for human-in-the-loop review...</div>
+                    </div>
+                </div>
+                <div id="step-5" class="step-item pending">
+                    <div class="step-icon">5</div>
+                    <div class="step-content">
+                        <div class="step-title">5. SecOps Audit Trail & Google Chat Notification</div>
+                        <div id="step-5-subtext" class="step-subtext">Posting confirmation card to Google Chat space...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="safety-banner">
+                <span style="font-size: 18px;">🛡️</span>
+                <div>
+                    <strong>Safety Assurance:</strong> Changes are staged into a Git branch and opened as a GitHub Pull Request for peer review. <strong>No code is applied directly to production.</strong>
+                </div>
+            </div>
+        </div>
+
+        <!-- ERROR VIEW -->
+        <div id="error-view" style="display: none;">
+            <div class="badge error-badge">
+                <span>⚠️</span>
+                <span>Remediation Error</span>
+            </div>
+            <h2>Unable to Complete Automated Remediation</h2>
+            <div id="error-message" class="error-box"></div>
+            <button onclick="startRemediation()" class="retry-button">🔄 Retry Remediation</button>
+        </div>
+
+        <!-- COMPLETED VIEW -->
+        <div id="completed-view" style="display: none;">
+            <div class="badge success-badge">
+                <span>🚀</span>
+                <span id="completed-badge-title">PR Opened for Review</span>
+            </div>
+            <h2 id="completed-heading">Pull Request Created Successfully</h2>
+            <div id="completed-pr-btn-container" style="margin-bottom: 24px;"></div>
+            <ul class="details-list" id="completed-details"></ul>
+            <div id="completed-explanation" class="explanation-box" style="display: none;"></div>
+            <div id="completed-code-container" class="code-container" style="display: none;"></div>
+            <div class="footer-note">
+                <span>💬</span>
+                <span>Confirmation update has been posted to your Google Chat space. You may review the PR or return to Google Chat.</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let startTime = Date.now();
+        let progressTimer = null;
+        let elapsedTimer = null;
+
+        function setStep(stepNum, state, subtext) {{
+            const el = document.getElementById('step-' + stepNum);
+            if (!el) return;
+            el.className = 'step-item ' + state;
+            const iconEl = el.querySelector('.step-icon');
+            if (state === 'completed') {{
+                iconEl.innerHTML = '✔';
+            }} else if (state === 'active') {{
+                iconEl.innerHTML = '<span class="step-spinner"></span>';
+            }} else {{
+                iconEl.innerText = stepNum;
+            }}
+            if (subtext) {{
+                const subtextEl = document.getElementById('step-' + stepNum + '-subtext');
+                if (subtextEl) subtextEl.innerText = subtext;
+            }}
+        }}
+
+        function setProgress(pct, statusText) {{
+            const bar = document.getElementById('progress-bar');
+            if (bar) bar.style.width = pct + '%';
+            const txt = document.getElementById('progress-status-text');
+            if (txt && statusText) txt.innerText = statusText;
+        }}
+
+        function startProgressAnimation() {{
+            setProgress(20, 'Invoking Vertex AI Gemini 2.5 Agent...');
+            
+            progressTimer = setInterval(() => {{
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                if (elapsed >= 5 && elapsed < 12) {{
+                    setProgress(35, 'Vertex AI: Analyzing least-privilege security controls...');
+                    setStep(2, 'active', 'Synthesizing declarative Terraform HCL with zero-trust validation...');
+                }} else if (elapsed >= 12 && elapsed < 20) {{
+                    setProgress(55, 'Vertex AI: Generating compliant Terraform configuration...');
+                    setStep(2, 'active', 'Formulating architectural reasoning and verification instructions...');
+                }} else if (elapsed >= 20 && elapsed < 27) {{
+                    setProgress(75, 'GitOps: Staging Terraform configuration to branch...');
+                    setStep(2, 'completed', 'Terraform HCL fix generated and validated.');
+                    setStep(3, 'active', 'Creating GitOps branch and committing configuration file...');
+                }} else if (elapsed >= 27) {{
+                    setProgress(90, 'GitHub: Opening Pull Request and notifying team...');
+                    setStep(3, 'completed', 'Code committed to dedicated remediations branch.');
+                    setStep(4, 'active', 'Submitting Pull Request via GitHub REST API...');
+                }}
+            }}, 1500);
+
+            elapsedTimer = setInterval(() => {{
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const el = document.getElementById('elapsed-time');
+                if (el) el.innerText = 'Elapsed: ' + elapsed + 's';
+            }}, 1000);
+        }}
+
+        function copyCode() {{
+            const codeEl = document.querySelector('#completed-code-container code');
+            if (codeEl) {{
+                navigator.clipboard.writeText(codeEl.textContent).then(() => {{
+                    const btn = document.getElementById('copy-code-btn');
+                    if (btn) {{
+                        btn.innerText = 'Copied!';
+                        setTimeout(() => {{ btn.innerText = 'Copy HCL'; }}, 2000);
+                    }}
+                }});
+            }}
+        }}
+
+        function startRemediation() {{
+            document.getElementById('loading-view').style.display = 'block';
+            document.getElementById('error-view').style.display = 'none';
+            document.getElementById('completed-view').style.display = 'none';
+            
+            startTime = Date.now();
+            startProgressAnimation();
+
+            const executeUrl = new URL(window.location.href);
+            executeUrl.searchParams.set('action', 'execute');
+
+            fetch(executeUrl.toString(), {{
+                method: 'GET',
+                headers: {{
+                    'Accept': 'application/json'
+                }}
+            }})
+            .then(async (resp) => {{
+                clearInterval(progressTimer);
+                clearInterval(elapsedTimer);
+                const data = await resp.json();
+                if (!resp.ok || (data.status !== 'success' && data.status !== 'already_remediated')) {{
+                    throw new Error(data.error || data.message || ('Server error: HTTP ' + resp.status));
+                }}
+                onRemediationComplete(data);
+            }})
+            .catch((err) => {{
+                clearInterval(progressTimer);
+                clearInterval(elapsedTimer);
+                document.getElementById('loading-view').style.display = 'none';
+                document.getElementById('error-view').style.display = 'block';
+                document.getElementById('error-message').innerText = err.message || 'Failed to complete remediation.';
+            }});
+        }}
+
+        function onRemediationComplete(data) {{
+            setProgress(100, 'Remediation completed successfully!');
+            setStep(2, 'completed', 'Terraform HCL generated and validated.');
+            setStep(3, 'completed', 'Code committed to dedicated branch.');
+            setStep(4, 'completed', 'GitHub Pull Request created.');
+            setStep(5, 'completed', 'Google Chat space notified.');
+
+            setTimeout(() => {{
+                document.getElementById('loading-view').style.display = 'none';
+                document.getElementById('completed-view').style.display = 'block';
+
+                if (data.status === 'already_remediated') {{
+                    const badgeTitle = document.getElementById('completed-badge-title');
+                    if (badgeTitle) badgeTitle.innerText = 'PR Already Active';
+                }}
+
+                const pr = data.github_pr || {{}};
+                const prUrl = data.pr_url || pr.pr_url;
+                const prNumber = data.pr_number || pr.pr_number;
+                const branchName = pr.branch_name || 'N/A';
+                const filePath = pr.file_path || 'N/A';
+
+                if (prUrl) {{
+                    document.getElementById('completed-pr-btn-container').innerHTML = `
+                        <a href="${{prUrl}}" target="_blank" class="pr-button">
+                            <svg height="18" width="18" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                            </svg>
+                            <span>Review Pull Request #${{prNumber || ''}} on GitHub &rarr;</span>
+                        </a>
+                    `;
+                    if (prNumber) {{
+                        document.getElementById('completed-heading').innerText = 'Pull Request #' + prNumber + ' Ready for Review';
+                    }}
+                }}
+
+                const detailsList = document.getElementById('completed-details');
+                detailsList.innerHTML = `
+                    <li><strong>Finding ID:</strong> <code>${{data.finding_id || ''}}</code></li>
+                    ${{prUrl ? `<li><strong>GitHub Pull Request:</strong> <a href="${{prUrl}}" target="_blank" style="color: #58a6ff; font-weight: 600;">#${{prNumber || ''}} (${{branchName}})</a></li>` : ''}}
+                    ${{filePath !== 'N/A' ? `<li><strong>Committed File:</strong> <code>${{filePath}}</code></li>` : ''}}
+                    <li><strong>Action:</strong> Automated Pull Request created for SecOps peer review.</li>
+                    <li><strong>Safety Guarantee:</strong> Changes have NOT been applied to live infrastructure.</li>
+                `;
+
+                if (data.explanation) {{
+                    const expBox = document.getElementById('completed-explanation');
+                    expBox.style.display = 'block';
+                    expBox.innerHTML = `<h4>Architectural Reasoning</h4><p></p>`;
+                    expBox.querySelector('p').textContent = data.explanation;
+                }}
+
+                if (data.terraform_code) {{
+                    const codeBox = document.getElementById('completed-code-container');
+                    codeBox.style.display = 'block';
+                    codeBox.innerHTML = `
+                        <div class="code-header">
+                            <span>Terraform Remediation (HCL)</span>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="staged-tag">Safely Staged &bull; NOT Applied</span>
+                                <button id="copy-code-btn" onclick="copyCode()" class="copy-btn">Copy HCL</button>
+                            </div>
+                        </div>
+                        <pre><code></code></pre>
+                    `;
+                    codeBox.querySelector('code').textContent = data.terraform_code;
+                }}
+            }}, 600);
+        }}
+
+        window.addEventListener('DOMContentLoaded', startRemediation);
+    </script>
+</body>
+</html>
+"""
+
+
 
 # -----------------------------------------------------------------------------
 # Cloud Run HTTP Webhook Handler
@@ -761,6 +1498,18 @@ def handle_chat_webhook(request):
     2. If user selects a fix option: invokes the Vertex AI agent to code the Terraform fix,
        stages the code safely in Firestore, and does NOT apply it.
     """
+    try:
+        return _handle_chat_webhook_impl(request)
+    except Exception as e:
+        logger.error(f"Unhandled exception in handle_chat_webhook: {traceback.format_exc()}")
+        return (
+            safe_json_dumps({"error": str(e), "status": "server_error"}),
+            500,
+            {"Content-Type": "application/json"}
+        )
+
+
+def _handle_chat_webhook_impl(request):
     if request.method == "OPTIONS":
         return ("", 204, {
             "Access-Control-Allow-Origin": "*",
@@ -772,7 +1521,7 @@ def handle_chat_webhook(request):
 
     if request.method == "GET" and not has_action_args:
         return (
-            json.dumps({
+            safe_json_dumps({
                 "status": "healthy",
                 "service": "scc-remediation-receiver",
                 "project_id": PROJECT_ID,
@@ -792,7 +1541,7 @@ def handle_chat_webhook(request):
         except Exception:
             data = {}
 
-    logger.info(f"Received webhook request ({request.method}): data={json.dumps(data)[:300]} args={request.args.to_dict()}")
+    logger.info(f"Received webhook request ({request.method}): data={safe_json_dumps(data)[:300]} args={request.args.to_dict()}")
 
     user_text = ""
     action_param = None
@@ -827,7 +1576,13 @@ def handle_chat_webhook(request):
     intent, chosen_option_num = classify_user_intent(user_text, action_param, option_param)
     logger.info(f"Intent evaluated: '{intent}' (chosen_option_num={chosen_option_num}) for text: '{user_text}'")
 
-    wants_html = request.method == "GET" or "text/html" in request.headers.get("Accept", "")
+    accept_header = request.headers.get("Accept", "")
+    if "application/json" in accept_header:
+        wants_html = False
+    elif "text/html" in accept_header:
+        wants_html = True
+    else:
+        wants_html = (request.method == "GET")
 
     # Find the target alert in Firestore
     doc_ref, alert_data = fetch_target_alert(finding_id=finding_id, thread_name=thread_name)
@@ -847,7 +1602,7 @@ def handle_chat_webhook(request):
                 {"Content-Type": "text/html; charset=utf-8"}
             )
         return (
-            json.dumps({"status": "not_found", "message": msg}),
+            safe_json_dumps({"status": "not_found", "message": msg}),
             404,
             {"Content-Type": "application/json"}
         )
@@ -862,6 +1617,36 @@ def handle_chat_webhook(request):
     # CASE 1: User does NOT want to act on the issue
     # -------------------------------------------------------------------------
     if intent == "NO_ACTION":
+        if alert_data.get("remediation_status") == "DISMISSED_NO_ACTION":
+            logger.info(f"Finding '{finding_key}' already dismissed. Returning existing status.")
+            if wants_html:
+                return (
+                    render_html_page(
+                        badge_icon="🛑",
+                        badge_title="Already Dismissed",
+                        badge_color="#8b949e",
+                        heading=f"Security Finding Already Dismissed: {issue_type}",
+                        details=[
+                            f"<strong>Finding ID:</strong> <code>{finding_key}</code>",
+                            f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                            "<strong>Decision:</strong> No action taken. Remediation was previously skipped.",
+                            "<strong>Status:</strong> Recorded in Firestore (no duplicate notification sent)."
+                        ]
+                    ),
+                    200,
+                    {"Content-Type": "text/html; charset=utf-8"}
+                )
+            return (
+                safe_json_dumps({
+                    "text": f"Security finding '{finding_key}' was already dismissed.",
+                    "status": "already_dismissed",
+                    "decision": "NO_ACTION",
+                    "finding_id": finding_key
+                }),
+                200,
+                {"Content-Type": "application/json"}
+            )
+
         logger.info(f"User decided NOT to act on finding '{finding_key}' ({issue_type}). Dismissing.")
 
         # Update Firestore record
@@ -900,7 +1685,7 @@ def handle_chat_webhook(request):
             )
 
         return (
-            json.dumps({
+            safe_json_dumps({
                 "text": chat_response_text,
                 "status": "success",
                 "decision": "NO_ACTION",
@@ -914,6 +1699,62 @@ def handle_chat_webhook(request):
     # CASE 2: User picked a Fix Option -> Generate Terraform Fix (Do not apply)
     # -------------------------------------------------------------------------
     elif intent == "REMEDIATE":
+        # Check idempotency: If a PR has already been opened for this alert, do not create a duplicate
+        existing_remediation = alert_data.get("remediation") or {}
+        existing_pr = existing_remediation.get("github_pr") or {}
+        existing_pr_url = existing_pr.get("pr_url")
+
+        if alert_data.get("remediation_status") == "PR_OPENED" and existing_pr_url:
+            existing_pr_num = existing_pr.get("pr_number")
+            existing_branch = existing_pr.get("branch_name", "N/A")
+            existing_file = existing_pr.get("file_path", "N/A")
+            existing_opt = existing_remediation.get("selected_option", {})
+            existing_code = existing_remediation.get("terraform_code")
+            existing_explanation = existing_remediation.get("explanation")
+            logger.info(
+                f"Finding '{finding_key}' already has active PR #{existing_pr_num} ({existing_pr_url}). "
+                "Returning existing PR details without re-triggering agent or notifications."
+            )
+
+            if wants_html:
+                return (
+                    render_html_page(
+                        badge_icon="🚀",
+                        badge_title="PR Already Open",
+                        badge_color="#3fb950",
+                        heading=f"Pull Request Already Active: #{existing_pr_num}",
+                        details=[
+                            f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
+                            f"<strong>Affected Resource:</strong> <code>{resource_name}</code>",
+                            f"<strong>GitHub Pull Request:</strong> <a href=\"{existing_pr_url}\" target=\"_blank\" style=\"color: #58a6ff; font-weight: 600;\">#{existing_pr_num} ({existing_branch})</a>",
+                            f"<strong>Committed File:</strong> <code>{existing_file}</code>",
+                            f"<strong>Remediation Strategy:</strong> {existing_opt.get('strategy', 'Remediation applied')}",
+                            "<strong>Notice:</strong> This Pull Request is already open in GitHub. Duplicate generation and duplicate chat notifications were prevented."
+                        ],
+                        code=existing_code,
+                        explanation=existing_explanation,
+                        pr_url=existing_pr_url,
+                        pr_number=existing_pr_num
+                    ),
+                    200,
+                    {"Content-Type": "text/html; charset=utf-8"}
+                )
+
+            return (
+                safe_json_dumps({
+                    "text": f"A Pull Request for this remediation is already open: {existing_pr_url}",
+                    "status": "already_remediated",
+                    "action": "GITHUB_PR_ALREADY_EXISTS",
+                    "finding_id": finding_key,
+                    "github_pr": existing_pr,
+                    "pr_url": existing_pr_url,
+                    "pr_number": existing_pr_num,
+                    "terraform_code": existing_code,
+                    "explanation": existing_explanation
+                }),
+                200,
+                {"Content-Type": "application/json"}
+            )
         selected_option = None
         target_num = chosen_option_num or 1
 
@@ -933,6 +1774,27 @@ def handle_chat_webhook(request):
                 "strategy": f"Apply security hardening policy for {issue_type}.",
                 "trade_offs": "Requires verification against production workload dependencies."
             }
+
+        action_arg = (request.args.get("action") or data.get("action") or "").lower()
+
+        # If this is a direct browser navigation (wants_html=True, action is NOT execute):
+        # Serve the real-time loading UI immediately (< 50ms) instead of hanging on about:blank!
+        if wants_html and action_arg != "execute":
+            logger.info(
+                f"Returning interactive loading screen for browser GET: finding='{finding_key}', option={target_num}"
+            )
+            return (
+                render_loading_html_page(
+                    finding_id=finding_key,
+                    issue_type=issue_type,
+                    resource_name=resource_name,
+                    option_number=target_num,
+                    option_title=selected_option.get("title", f"Fix Option {target_num}"),
+                    option_strategy=selected_option.get("strategy", f"Apply security hardening policy for {issue_type}.")
+                ),
+                200,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
 
         logger.info(
             f"Invoking Terraform Remediation Agent for finding '{finding_key}' "
@@ -1042,8 +1904,7 @@ def handle_chat_webhook(request):
                 f"🌿 *Branch:* `{branch_name}`\n"
                 f"📁 *File:* `{file_path}`\n\n"
                 f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
-                f"It *has NOT been applied* to live infrastructure.\n\n"
-                f"```hcl\n{tf_code[:1000]}\n```"
+                f"It *has NOT been applied* to live infrastructure."
             )
             details_list = [
                 f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
@@ -1056,11 +1917,10 @@ def handle_chat_webhook(request):
             heading_text = f"Pull Request Opened: #{pr_number}"
         else:
             chat_msg_text = (
-                f"✅ *Terraform Fix Code Generated!*\n\n"
+                f"✅ *Terraform Fix Prepared!*\n\n"
                 f"The remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
                 f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                f"🔒 *Safety Policy:* The code has been safely staged in Firestore and *has NOT been applied* to live infrastructure.\n\n"
-                f"```hcl\n{tf_code[:1200]}\n```"
+                f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
             )
             details_list = [
                 f"<strong>Finding Category:</strong> <code>{issue_type}</code>",
@@ -1092,13 +1952,15 @@ def handle_chat_webhook(request):
             )
 
         return (
-            json.dumps({
+            safe_json_dumps({
                 "text": chat_msg_text,
                 "status": "success",
                 "action": "GITHUB_PR_OPENED" if pr_success else "TERRAFORM_CODE_GENERATED",
                 "finding_id": finding_key,
                 "selected_option": target_num,
                 "github_pr": pr_result if pr_success else None,
+                "pr_url": pr_url if pr_success else None,
+                "pr_number": pr_number if pr_success else None,
                 "applied_to_infrastructure": False,
                 "terraform_code": tf_code,
                 "explanation": explanation
@@ -1133,7 +1995,7 @@ def handle_chat_webhook(request):
                 {"Content-Type": "text/html; charset=utf-8"}
             )
         return (
-            json.dumps({"text": clarification_msg, "status": "clarification_needed"}),
+            safe_json_dumps({"text": clarification_msg, "status": "clarification_needed"}),
             200,
             {"Content-Type": "application/json"}
         )

@@ -7,10 +7,45 @@ import sys
 import traceback
 import urllib.parse
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import functions_framework
 import requests
 from google.cloud import firestore
+
+# -----------------------------------------------------------------------------
+# Environment Loader
+# -----------------------------------------------------------------------------
+def load_env_file():
+    """Loads environment variables from .env if present without overwriting existing vars."""
+    search_dirs = [
+        os.getcwd(),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ]
+    for directory in search_dirs:
+        env_file = os.path.join(directory, ".env")
+        if os.path.isfile(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if line.startswith("export "):
+                            line = line[7:].strip()
+                        if "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+            break
+
+load_env_file()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +62,7 @@ def get_firestore_client():
     """Lazily initializes and returns the Firestore client."""
     global _db_client
     if _db_client is None:
-        project_id = os.environ.get("PROJECT_ID", "go-capstone-manus")
+        project_id = os.environ.get("PROJECT_ID")
         _db_client = firestore.Client(project=project_id)
         logger.info(f"Initialized Firestore client for project: {project_id}")
     return _db_client
@@ -75,13 +110,17 @@ def call_vertex_ai(payload: dict, project_id: str, location: str, model_name: st
     next_steps = finding.get("nextSteps", "")
 
     system_instruction = (
-        "You are an elite Principal Cloud Security Architect. "
-        "Your role is to analyze Google Cloud Security Command Center (SCC) findings and provide "
-        "clear, actionable remediation strategies and fix options for security and platform engineering teams. "
-        "CRITICAL REQUIREMENT: Do NOT generate code snippets, CLI commands, scripts, or Terraform HCL blocks. "
-        "Instead, provide concise, high-level technical fix options and remediation strategies explaining "
-        "what actions should be taken, operational considerations, pros and cons. "
-        "You must explicitly recommend which fix option is best and provide rigorous security and architectural reasoning."
+        "You are an elite Principal Cloud Security Architect specializing in Infrastructure as Code (Terraform) on Google Cloud Platform.\n"
+        "Your role is to analyze Google Cloud Security Command Center (SCC) findings and formulate "
+        "declarative Infrastructure-as-Code (Terraform) remediation strategies for platform and security engineering teams.\n\n"
+        "STRICT MANDATORY RULES:\n"
+        "1. ALL remediation strategies and fix options MUST represent Infrastructure-as-Code (Terraform) configuration changes "
+        "(e.g., enabling uniform bucket-level access, enforcing restrictive IAM policy bindings, configuring private Google access or firewall rules, enabling encryption).\n"
+        "2. NEVER mention or suggest manual Google Cloud Console clicks, GUI instructions, or imperative CLI commands "
+        "(such as `gcloud`, `gsutil`, `bq`, `kubectl`, or shell scripts).\n"
+        "3. In the fix option descriptions and summaries, describe what the architectural and policy changes do in clear, high-level technical terms. "
+        "Do NOT include code snippets, backtick code fences, or raw Terraform HCL syntax.\n"
+        "4. Explicitly recommend which Terraform fix option is best and provide rigorous security, operational, and architectural reasoning."
     )
 
     user_prompt = f"""
@@ -101,14 +140,14 @@ Respond strictly in JSON matching this exact structure:
   "fix_options": [
     {{
       "option_number": 1,
-      "title": "Clear descriptive name for this remediation option",
-      "strategy": "Concise summary of the approach and specific actions to take",
+      "title": "Clear descriptive name for this Terraform remediation strategy",
+      "strategy": "Concise summary of what architectural and policy configuration changes will be made in the Terraform configuration (no code or CLI commands)",
       "trade_offs": "Operational considerations, pros/cons, and impact on workload or connectivity"
     }},
     {{
       "option_number": 2,
-      "title": "Alternative remediation option name",
-      "strategy": "Alternative approach summary and specific actions to take",
+      "title": "Alternative Terraform remediation strategy name",
+      "strategy": "Alternative approach describing the policy/configuration changes to be enforced in Terraform (no code or CLI commands)",
       "trade_offs": "Operational considerations, pros/cons, and comparison to Option 1"
     }}
   ],
@@ -131,11 +170,19 @@ Respond strictly in JSON matching this exact structure:
             model_name=model_name,
             system_instruction=[system_instruction],
         )
-        gen_config = GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-            max_output_tokens=8192,
-        )
+        try:
+            gen_config = GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+                max_output_tokens=8192,
+                thinking_config={"thinking_budget": 1024}
+            )
+        except Exception:
+            gen_config = GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+                max_output_tokens=8192,
+            )
         response = model.generate_content(user_prompt, generation_config=gen_config)
         raw_response_text = response.text
         print(f"Vertex AI response received via SDK ({len(raw_response_text)} chars)", flush=True)
@@ -166,6 +213,9 @@ Respond strictly in JSON matching this exact structure:
                     "responseMimeType": "application/json",
                     "temperature": 0.2,
                     "maxOutputTokens": 8192,
+                    "thinkingConfig": {
+                        "thinkingBudget": 1024
+                    }
                 },
             }
             req_headers = {
@@ -421,7 +471,6 @@ def build_google_chat_payload(
     })
 
     card_v2_payload = {
-        "text": full_markdown_text,
         "cardsV2": [
             {
                 "cardId": f"scc_alert_{sanitize_doc_id(issue_type)}",
@@ -438,12 +487,13 @@ def build_google_chat_payload(
         ]
     }
 
-    return card_v2_payload
+    return card_v2_payload, full_markdown_text
 
 
-def dispatch_to_google_chat(webhook_url: str, payload: dict) -> tuple[str, str]:
+def dispatch_to_google_chat(webhook_url: str, payload: dict, fallback_text: Optional[str] = None) -> tuple[str, str]:
     """
-    Sends the formatted message card to Google Chat via Incoming Webhook.
+    Sends the formatted Card V2 message to Google Chat via Incoming Webhook.
+    If the card payload fails, falls back to plain-text markdown.
     Returns (status, details).
     """
     if not webhook_url or not webhook_url.strip():
@@ -459,11 +509,24 @@ def dispatch_to_google_chat(webhook_url: str, payload: dict) -> tuple[str, str]:
         )
         if resp.status_code == 200:
             logger.info("Successfully dispatched alert card to Google Chat!")
-            return ("SUCCESS", "Message posted to Google Chat successfully.")
-        else:
-            err_msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
-            logger.error(f"Failed to post to Google Chat webhook: {err_msg}")
-            return ("FAILED", err_msg)
+            return ("SUCCESS", "Card posted to Google Chat successfully.")
+
+        # If card posting failed and fallback text is provided, attempt fallback
+        if fallback_text:
+            logger.warning(f"Card post rejected (HTTP {resp.status_code}): {resp.text[:200]}. Attempting plain-text fallback...")
+            fallback_resp = requests.post(
+                webhook_url.strip(),
+                json={"text": fallback_text},
+                headers={"Content-Type": "application/json; charset=UTF-8"},
+                timeout=10
+            )
+            if fallback_resp.status_code == 200:
+                logger.info("Successfully dispatched plain-text fallback to Google Chat!")
+                return ("SUCCESS_FALLBACK_TEXT", "Card rejected; fallback plain text posted.")
+
+        err_msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        logger.error(f"Failed to post to Google Chat webhook: {err_msg}")
+        return ("FAILED", err_msg)
     except Exception as e:
         err_msg = f"Exception during Google Chat post: {str(e)}"
         logger.error(err_msg)
@@ -543,7 +606,7 @@ def process_scc_alert(cloud_event):
     finding_name = finding.get("name", "")
     finding_id = finding_name.split("/")[-1] if finding_name else message_id
 
-    project_id = os.environ.get("PROJECT_ID", "go-capstone-manus")
+    project_id = os.environ.get("PROJECT_ID", "")
     vertex_location = os.environ.get("VERTEX_AI_LOCATION", "europe-west2")
     vertex_model = os.environ.get("VERTEX_AI_MODEL", "gemini-2.5-flash")
     chat_webhook_url = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
@@ -618,8 +681,8 @@ def process_scc_alert(cloud_event):
     )
 
     # Step 4: Build Google Chat Card V2 and dispatch
-    receiver_url = os.environ.get("REMEDIATION_RECEIVER_URL", "https://scc-remediation-receiver-nntcdytgna-nw.a.run.app")
-    chat_payload = build_google_chat_payload(
+    receiver_url = os.environ.get("REMEDIATION_RECEIVER_URL", "")
+    chat_payload, fallback_text = build_google_chat_payload(
         issue_type=issue_type,
         severity=severity,
         resource_name=resource_name,
@@ -631,7 +694,8 @@ def process_scc_alert(cloud_event):
 
     chat_status, chat_details = dispatch_to_google_chat(
         webhook_url=chat_webhook_url,
-        payload=chat_payload
+        payload=chat_payload,
+        fallback_text=fallback_text
     )
 
     # Step 5: Save enriched alert in Firestore 'alerts' collection

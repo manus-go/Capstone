@@ -10,7 +10,7 @@ pubsub_subscription_name   = "scc-high-alerts-sub"
 scc_notification_config_id = "scc-high-alerts-config"
 
 # Optional: Google Chat & GitHub Integration
-# google_chat_webhook_url    = "https://chat.googleapis.com/v1/spaces/..."
+# google_chat_webhook_url    = "https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=KEY&token=TOKEN"
 # github_token               = "gho_..."
-# github_repo                = "manus-go/Capstone"
+# github_repo                = "your-username/your-repo"
 # github_base_branch         = "main"
