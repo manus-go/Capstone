@@ -36,3 +36,12 @@
   4. Invoke `record_remediation_audit` to persist audit records in `alerts/` and `remediations/`.
   5. Invoke `dispatch_google_chat_notification` to broadcast PR details without raw code to Google Chat.
 - **Pre-Execution Idempotency Gate**: Webhook handlers must check `alert_data["remediation_status"] == "PR_OPENED"` and `existing_pr_url` prior to initializing the ADK runner, immediately returning the existing PR to avoid duplicate branches, commits, or notifications.
+
+## 8. Security Finding Simulation & Test Harness Invariants
+- **Automated Teardown Required**: Any script creating intentionally vulnerable cloud infrastructure (e.g., public storage buckets, broad firewall rules, over-privileged IAM bindings) MUST implement a corresponding `--delete` / cleanup flag to remove resources immediately after test completion.
+- **REST/ADC Portability**: Simulation scripts must offer zero-dependency Python implementations utilizing Google Cloud REST APIs and Application Default Credentials (`~/.config/gcloud/application_default_credentials.json` or `google-auth`), alongside optional shell/CLI (`gcloud`) scripts.
+- **Detector Semantics & Documentation**: Each simulation toolchain must be documented in `scripts/README.md` defining:
+  1. The exact SCC detector ID and trigger conditions (e.g. UBLA disabled, PAP inherited).
+  2. Public principal semantics (distinguishing unauthenticated internet `allUsers` from authenticated accounts `allAuthenticatedUsers`).
+  3. Declarative Terraform (HCL) remediation snippet adhering to Section 2.
+
