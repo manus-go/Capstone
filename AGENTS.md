@@ -40,6 +40,10 @@
 ## 8. Security Finding Simulation & Test Harness Invariants
 - **Automated Teardown Required**: Any script creating intentionally vulnerable cloud infrastructure (e.g., public storage buckets, broad firewall rules, over-privileged IAM bindings) MUST implement a corresponding `--delete` / cleanup flag to remove resources immediately after test completion.
 - **REST/ADC Portability**: Simulation scripts must offer zero-dependency Python implementations utilizing Google Cloud REST APIs and Application Default Credentials (`~/.config/gcloud/application_default_credentials.json` or `google-auth`), alongside optional shell/CLI (`gcloud`) scripts.
+- **Dual-Mode Simulation & CAI Latency Awareness**:
+  1. *Physical Infrastructure Mode*: Simulates real misconfigured cloud assets (e.g. buckets with public ACLs). Documentation must explicitly note the Cloud Asset Inventory (CAI) mixed-mode scanning model, where Security Health Analytics (SHA) batch scanning cycles introduce a 10–30+ minute detection lag.
+  2. *Instant Custom Source Mode*: For live demonstrations, evaluator walkthroughs, or fast CI test suites requiring deterministic sub-second triggers, simulation scripts must support direct event injection into a project-level Custom Finding Source (`projects/{project_id}/sources/{source_id}`) with `state="ACTIVE"`, bypassing CAI scan latency and immediately triggering Continuous Export Pub/Sub pipelines.
+- **Finding Lifecycle & Dashboard Hygiene**: Finding simulation tools must provide automated lifecycle controls (`--mute` via `set-mute` / `POST :setMute` with `mute="MUTED"`, or `--inactive`) to clear resolved alerts from active SCC console dashboards without leaving lingering security noise.
 - **Detector Semantics & Documentation**: Each simulation toolchain must be documented in `scripts/README.md` defining:
   1. The exact SCC detector ID and trigger conditions (e.g. UBLA disabled, PAP inherited).
   2. Public principal semantics (distinguishing unauthenticated internet `allUsers` from authenticated accounts `allAuthenticatedUsers`).
