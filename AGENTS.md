@@ -17,3 +17,22 @@
 
 ## 4. Cloud Functions Gen 2 & Cloud Run Invariants
 - **CPU & Memory Ratios**: When configuring Cloud Functions Gen 2 / Cloud Run containers with `available_memory = "1024M"` or higher, ALWAYS set `available_cpu = "1"` in Terraform `service_config`. Omitting CPU triggers Cloud Run deployment validation errors.
+
+## 5. Technical Documentation & Google Docs Invariants
+- **Non-Destructive Section Updates**: When updating existing Google Docs or architecture specifications, never use full-document wipes (`mutate write` or full `mutate sync`) if the document contains embedded diagrams, images, or drawings. Always map character index boundaries (`readonly structure --json`) and perform targeted in-place section updates.
+- **Paragraph Style Isolation**: When inserting rich-text runs or body paragraphs after headings in batch operations, explicitly enforce `namedStyleType: "NORMAL_TEXT"` to prevent paragraphs from inheriting heading styles.
+- **Ephemeral Validation for Complex Batches**: For batch updates containing tables or dense formatting, always validate the batch execution against an ephemeral scratch document before modifying live design documents.
+
+## 6. Two-Phase Browser Webhook & Staging UI Invariants
+- **Sub-50ms Initial Response**: When an operator navigates to or clicks a Cloud Run webhook receiver from a browser (`GET` with `text/html` accept header), the service must immediately return a lightweight interactive loading page (`< 50ms`) rather than blocking the HTTP connection during agent reasoning.
+- **Client-Side Background Execution**: The loading UI must trigger the actual agent execution via asynchronous background `fetch(...?action=execute)` while rendering an animated progress bar and pipeline step checklist.
+- **Review Dashboard Completeness**: Upon completion, the UI must display the GitHub PR link, committed branch, target file, architectural rationale, and a read-only HCL code viewer tagged with `Safely Staged • NOT Applied`.
+
+## 7. Autonomous ADK Multi-Tool GitOps Execution Order
+- **Sequential Tool Chain**: Autonomous ADK remediation agents must enforce a strict 5-step operational pipeline:
+  1. Generate complete declarative Terraform code with inline remediation comments.
+  2. Invoke `validate_terraform_code` to verify syntax, required HCL blocks, and brace matching.
+  3. Invoke `create_github_pull_request_tool` to create a dedicated branch, commit HCL, and open a PR.
+  4. Invoke `record_remediation_audit` to persist audit records in `alerts/` and `remediations/`.
+  5. Invoke `dispatch_google_chat_notification` to broadcast PR details without raw code to Google Chat.
+- **Pre-Execution Idempotency Gate**: Webhook handlers must check `alert_data["remediation_status"] == "PR_OPENED"` and `existing_pr_url` prior to initializing the ADK runner, immediately returning the existing PR to avoid duplicate branches, commits, or notifications.
