@@ -80,6 +80,60 @@ gcloud storage rm --recursive gs://my-test-bucket
 
 ---
 
+## 2. Instant Demo Simulation (Custom Source Bypass)
+
+### Why SCC Doesn't Notice Misconfigurations Immediately
+
+Security Command Center (SCC) runs a **mixed-mode scanning model** that relies heavily on **Cloud Asset Inventory (CAI)**:
+- **Real-Time Stream**: If CAI real-time feeds are active and warmed for the resource type, state change events are reflected quickly.
+- **Batch Scanning Lag**: Security Health Analytics (SHA) detectors for resources like Cloud Storage buckets frequently run on periodic or batch scanning cycles. If an asset is created outside an active feed cycle, there may be an inherent **10 to 30+ minute lag** before SCC generates the finding.
+
+### Instant Demo Solution: Custom Finding Sources
+
+For live demonstrations and automated integration test suites where sub-second latency is required, you can bypass the CAI scan interval by registering a **Custom Finding Source** and publishing the finding directly to SCC:
+1. Findings inserted directly into an SCC source are visible **immediately** in the Google Cloud Console under the **Findings** tab.
+2. SCC **Continuous Export** (`scc-high-alerts-config`) evaluates the active finding instantly.
+3. The finding is streamed directly to `scc-high-alerts-topic`, triggering the CloudGuard SecOps pipeline (Gemini ADK triage $\rightarrow$ Google Chat Card V2 $\rightarrow$ Staging UI / GitHub PR) without delay.
+4. After pipeline remediation, the finding can be marked as `MUTED` or `INACTIVE`.
+
+---
+
+## Instant Simulation Scripts
+
+### Option A: Python Script (Zero External Dependencies)
+[`simulate_scc_finding.py`](./simulate_scc_finding.py) uses the Google Cloud SCC v1 REST API and Application Default Credentials (ADC) or `google-auth`.
+
+```bash
+# 1. Create instant finding (automatically gets or creates 'Demo Source')
+python3 scripts/simulate_scc_finding.py
+
+# 2. Specify custom finding ID, category, or target resource
+python3 scripts/simulate_scc_finding.py \
+  --project go-capstone-manus \
+  --finding-id demo-finding-01 \
+  --category PUBLIC_BUCKET_ACL \
+  --resource "//storage.googleapis.com/go-capstone-manus-demo-bucket"
+
+# 3. Mute finding when remediation completes
+python3 scripts/simulate_scc_finding.py --finding-id demo-finding-01 --mute
+```
+
+### Option B: Bash Script (`gcloud scc`)
+[`simulate_scc_finding.sh`](./simulate_scc_finding.sh) provides a shell wrapper around the official `gcloud scc` CLI.
+
+```bash
+# 1. Create instant finding with defaults
+./scripts/simulate_scc_finding.sh
+
+# 2. Custom finding ID and bucket resource
+./scripts/simulate_scc_finding.sh --finding-id demo-finding-01 --bucket my-demo-bucket
+
+# 3. Set finding to MUTED after pipeline verification
+./scripts/simulate_scc_finding.sh --finding-id demo-finding-01 --mute
+```
+
+---
+
 ## Verifying the Finding in Pipeline
 
 Once the bucket is created:
