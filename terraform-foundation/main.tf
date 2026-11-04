@@ -425,6 +425,18 @@ resource "google_project_iam_member" "alert_router_service_usage_consumer" {
   member  = "serviceAccount:${google_service_account.alert_router.email}"
 }
 
+resource "google_project_iam_member" "alert_router_bigquery_user" {
+  project = var.project_id
+  role    = "roles/bigquery.user"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
+resource "google_project_iam_member" "alert_router_bigquery_data_viewer" {
+  project = var.project_id
+  role    = "roles/bigquery.dataViewer"
+  member  = "serviceAccount:${google_service_account.alert_router.email}"
+}
+
 resource "google_project_iam_member" "pubsub_token_creator" {
   project = var.project_id
   role    = "roles/iam.serviceAccountTokenCreator"
@@ -467,6 +479,8 @@ resource "google_cloudfunctions2_function" "scc_alert_router" {
       GOOGLE_GENAI_USE_VERTEXAI = "TRUE"
       GOOGLE_CLOUD_PROJECT     = var.project_id
       GOOGLE_CLOUD_LOCATION    = var.vertex_ai_location
+      BIGQUERY_DATASET         = var.bigquery_dataset_id
+      BIGQUERY_TABLE           = var.bigquery_table_id
     }
   }
 
@@ -534,6 +548,8 @@ resource "google_cloudfunctions2_function" "scc_remediation_receiver" {
       GOOGLE_GENAI_USE_VERTEXAI = "TRUE"
       GOOGLE_CLOUD_PROJECT     = var.project_id
       GOOGLE_CLOUD_LOCATION    = var.vertex_ai_location
+      BIGQUERY_DATASET         = var.bigquery_dataset_id
+      BIGQUERY_TABLE           = var.bigquery_table_id
     }
   }
 

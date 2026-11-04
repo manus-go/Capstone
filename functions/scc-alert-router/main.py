@@ -81,13 +81,75 @@ def sanitize_doc_id(raw_id: str) -> str:
     return sanitized[:200]
 
 
+def parse_resource_display(resource_name: str, project_id: str = "") -> Dict[str, str]:
+    """
+    Parses an SCC resourceName URI into a clean resource name, asset type, and project ID.
+    Examples:
+      //storage.googleapis.com/projects/_/buckets/my-bucket -> my-bucket (Cloud Storage Bucket)
+      //compute.googleapis.com/projects/p/global/firewalls/allow-ssh -> allow-ssh (VPC Firewall Rule)
+      //iam.googleapis.com/projects/p/serviceAccounts/sa@p.iam.gserviceaccount.com -> sa@p... (IAM Service Account)
+    """
+    raw = (resource_name or "").strip()
+    clean_name = raw
+    asset_type = "GCP Resource"
+    extracted_proj = project_id
+
+    # Check for project in URI
+    proj_match = re.search(r"/projects/([^/]+)", raw)
+    if proj_match and proj_match.group(1) != "_":
+        extracted_proj = proj_match.group(1)
+
+    if "storage.googleapis.com" in raw or "/buckets/" in raw:
+        asset_type = "Cloud Storage Bucket"
+        parts = raw.split("/buckets/")
+        if len(parts) > 1:
+            clean_name = parts[-1].split("/")[0]
+    elif "compute.googleapis.com" in raw or "/firewalls/" in raw or "/instances/" in raw or "/disks/" in raw or "/subnetworks/" in raw:
+        if "/firewalls/" in raw:
+            asset_type = "VPC Firewall Rule"
+            clean_name = raw.split("/firewalls/")[-1].split("/")[0]
+        elif "/instances/" in raw:
+            asset_type = "Compute Engine VM"
+            clean_name = raw.split("/instances/")[-1].split("/")[0]
+        elif "/disks/" in raw:
+            asset_type = "Persistent Disk"
+            clean_name = raw.split("/disks/")[-1].split("/")[0]
+        elif "/subnetworks/" in raw:
+            asset_type = "VPC Subnetwork"
+            clean_name = raw.split("/subnetworks/")[-1].split("/")[0]
+        elif "/networks/" in raw:
+            asset_type = "VPC Network"
+            clean_name = raw.split("/networks/")[-1].split("/")[0]
+        else:
+            asset_type = "Compute Engine Resource"
+            clean_name = raw.rstrip("/").split("/")[-1]
+    elif "iam.googleapis.com" in raw or "/serviceAccounts/" in raw:
+        asset_type = "IAM Service Account"
+        if "/serviceAccounts/" in raw:
+            clean_name = raw.split("/serviceAccounts/")[-1].split("/")[0]
+        else:
+            clean_name = raw.rstrip("/").split("/")[-1]
+    elif "cloudresourcemanager.googleapis.com" in raw or ("/projects/" in raw and raw.endswith(extracted_proj)):
+        asset_type = "Cloud Project"
+        clean_name = extracted_proj
+    elif "/" in raw:
+        clean_name = raw.rstrip("/").split("/")[-1]
+
+    return {
+        "clean_resource_name": clean_name or "Unknown Resource",
+        "asset_type": asset_type,
+        "project_id": extracted_proj or project_id or "GCP Project",
+        "full_resource": raw
+    }
+
+
 def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_name: str) -> dict:
     """
     Invokes the Google Agent Development Kit (ADK) autonomous Triage Agent equipped with
     the `publish_triage_assessment` tool to:
-    1. Write a technical issue summary.
-    2. Formulate declarative Terraform remediation options (strictly avoiding CLI commands).
-    3. Determine and justify the objectively best fix option.
+    1. Write a 1-sentence technical issue and breach risk summary.
+    2. Formulate declarative Terraform remediation options with concise summaries, pros, and cons.
+    3. Provide deep architectural rationale and compliance/blast radius analysis for on-demand inspection.
     """
     finding = payload.get("finding", {})
     if not isinstance(finding, dict):
@@ -122,50 +184,90 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
 
     triage_result: Dict[str, Any] = {}
 
+    def normalize_str_list(val: Any) -> List[str]:
+        if isinstance(val, list):
+            return [str(x).strip("-* \t\n") for x in val if str(x).strip()]
+        if isinstance(val, str):
+            return [line.strip("-* \t\n") for line in val.split("\n") if line.strip()]
+        return []
+
     def publish_triage_assessment(
-        issue_summary: str,
+        one_sentence_summary: str,
+        recommended_option_number: int,
         option_1_title: str,
-        option_1_strategy: str,
-        option_1_trade_offs: str,
+        option_1_summary: str,
+        option_1_pros: List[str],
+        option_1_cons: List[str],
         option_2_title: str,
-        option_2_strategy: str,
-        option_2_trade_offs: str,
-        best_option_title: str,
-        best_option_reasoning: str
+        option_2_summary: str,
+        option_2_pros: List[str],
+        option_2_cons: List[str],
+        deep_architectural_reasoning: str,
+        compliance_and_blast_radius: str
     ) -> dict:
         """Publishes the structured triage assessment and Terraform remediation options for the security finding.
 
         Args:
-            issue_summary: Concise 2-3 sentence technical overview of the vulnerability, affected resource, and exploit/breach risk.
-            option_1_title: Clear descriptive name for the primary Terraform remediation strategy.
-            option_1_strategy: Description of the architectural and policy configuration changes in Terraform (no CLI commands or raw code blocks).
-            option_1_trade_offs: Operational considerations, pros/cons, and impact on workload or connectivity.
-            option_2_title: Alternative Terraform remediation strategy name.
-            option_2_strategy: Alternative approach describing the policy or configuration changes in Terraform (no CLI commands or raw code blocks).
-            option_2_trade_offs: Operational considerations, pros/cons, and comparison to Option 1.
-            best_option_title: Exact title of the fix option considered best.
-            best_option_reasoning: Detailed justification explaining why this option is objectively superior.
+            one_sentence_summary: Exactly one concise, punchy sentence summarizing the vulnerability, affected resource, and breach/exploit risk. No filler words.
+            recommended_option_number: Integer 1 or 2 identifying which option is objectively recommended.
+            option_1_title: Short descriptive title for Option 1 (e.g. Enforce Uniform Bucket-Level Access).
+            option_1_summary: Exactly one clear sentence explaining what Terraform changes this option applies.
+            option_1_pros: 2 to 3 concise bullet points highlighting key security and operational benefits.
+            option_1_cons: 1 to 2 concise bullet points highlighting limitations, operational trade-offs, or migration impact.
+            option_2_title: Short descriptive title for Option 2 (e.g. Enforce Private IP & IAM Restriction).
+            option_2_summary: Exactly one clear sentence explaining what alternative Terraform changes this option applies.
+            option_2_pros: 2 to 3 concise bullet points highlighting benefits.
+            option_2_cons: 1 to 2 concise bullet points highlighting trade-offs.
+            deep_architectural_reasoning: In-depth technical rationale and architecture justification explaining why the recommended option was chosen.
+            compliance_and_blast_radius: Analysis of CIS/NIST compliance alignment, production blast radius, and workload dependencies.
         """
-        triage_result["issue_summary"] = issue_summary
+        opt1_p = normalize_str_list(option_1_pros)
+        opt1_c = normalize_str_list(option_1_cons)
+        opt2_p = normalize_str_list(option_2_pros)
+        opt2_c = normalize_str_list(option_2_cons)
+
+        try:
+            rec_num = int(recommended_option_number)
+            if rec_num not in [1, 2]:
+                rec_num = 1
+        except Exception:
+            rec_num = 1
+
+        triage_result["issue_summary"] = one_sentence_summary.strip()
+        triage_result["recommended_option_number"] = rec_num
+        triage_result["deep_architectural_reasoning"] = deep_architectural_reasoning.strip()
+        triage_result["compliance_and_blast_radius"] = compliance_and_blast_radius.strip()
+
+        opt1_tradeoffs = f"Pros: {'; '.join(opt1_p)} | Cons: {'; '.join(opt1_c)}" if (opt1_p or opt1_c) else ""
+        opt2_tradeoffs = f"Pros: {'; '.join(opt2_p)} | Cons: {'; '.join(opt2_c)}" if (opt2_p or opt2_c) else ""
+
         triage_result["fix_options"] = [
             {
                 "option_number": 1,
-                "title": option_1_title,
-                "strategy": option_1_strategy,
-                "trade_offs": option_1_trade_offs
+                "title": option_1_title.strip(),
+                "summary": option_1_summary.strip(),
+                "strategy": option_1_summary.strip(),
+                "pros": opt1_p,
+                "cons": opt1_c,
+                "trade_offs": opt1_tradeoffs
             },
             {
                 "option_number": 2,
-                "title": option_2_title,
-                "strategy": option_2_strategy,
-                "trade_offs": option_2_trade_offs
+                "title": option_2_title.strip(),
+                "summary": option_2_summary.strip(),
+                "strategy": option_2_summary.strip(),
+                "pros": opt2_p,
+                "cons": opt2_c,
+                "trade_offs": opt2_tradeoffs
             }
         ]
+        best_title = option_1_title if rec_num == 1 else option_2_title
         triage_result["best_option"] = {
-            "recommended_title": best_option_title,
-            "reasoning": best_option_reasoning
+            "recommended_option_number": rec_num,
+            "recommended_title": best_title.strip(),
+            "reasoning": deep_architectural_reasoning.strip()
         }
-        return {"status": "published", "title": best_option_title}
+        return {"status": "published", "title": best_title, "recommended_option": rec_num}
 
     agent_instruction = (
         "You are an elite Principal Cloud Security Architect specializing in Infrastructure as Code (Terraform) on Google Cloud Platform.\n"
@@ -176,11 +278,12 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
         "(e.g., enabling uniform bucket-level access, enforcing restrictive IAM policy bindings, configuring private Google access or firewall rules, enabling encryption).\n"
         "2. NEVER mention or suggest manual Google Cloud Console clicks, GUI instructions, or imperative CLI commands "
         "(such as `gcloud`, `gsutil`, `bq`, `kubectl`, or shell scripts).\n"
-        "3. In the fix option descriptions and summaries, describe what the architectural and policy changes do in clear, high-level technical terms. "
-        "Do NOT include code snippets, backtick code fences, or raw Terraform HCL syntax.\n"
-        "4. Explicitly recommend which Terraform fix option is best and provide rigorous security, operational, and architectural reasoning.\n"
-        "5. You MUST call the `publish_triage_assessment` tool to deliver your structured findings.\n"
-        "6. No fallbacks: perform precise and authoritative analysis."
+        "3. High-density, concise communication: The initial alert summary must be exactly ONE punchy sentence. Keep option summaries to single sentences and pros/cons to brief bullets.\n"
+        "4. Place comprehensive technical rationale, workload blast radius, and CIS/NIST compliance impacts into deep_architectural_reasoning and compliance_and_blast_radius for on-demand inspection.\n"
+        "5. Do NOT include code snippets, backtick code fences, or raw Terraform HCL syntax in summaries or titles.\n"
+        "6. Explicitly designate which option (1 or 2) is recommended.\n"
+        "7. You MUST call the `publish_triage_assessment` tool to deliver your structured findings.\n"
+        "8. No fallbacks: perform precise and authoritative analysis."
     )
 
     triage_agent = Agent(
@@ -243,20 +346,25 @@ def build_google_chat_payload(
     project_id: str,
     finding_id: str = "",
     receiver_url: str = ""
-) -> dict:
+) -> Tuple[dict, str]:
     """
-    Constructs a Google Chat message containing both a rich Card V2
-    and companion Markdown text with:
-    1. Issue Summary
-    2. Remediation Fix Options
-    3. Explicit Best Option Recommendation
-    4. One-Click Interactive Buttons and Links
+    Constructs an interactive Google Chat Card V2 message adhering strictly to:
+    - 5-second scannable header and executive summary
+    - Clean Option 1 and Option 2 cards with ⭐ AI Recommended badge and concise Pros/Cons
+    - Card Exclusivity (contains ONLY 'cardsV2', never top-level 'text')
+    - No raw code blocks in chat
+    - Interactive links: Fix Option 1, Fix Option 2, Don't Act, Show More Details, and SCC Console
     """
     summary = ai_analysis.get("issue_summary", "No summary provided.")
     fix_options = ai_analysis.get("fix_options", [])
+    rec_opt_num = ai_analysis.get("recommended_option_number") or ai_analysis.get("best_option", {}).get("recommended_option_number", 1)
     best_option = ai_analysis.get("best_option", {})
     best_title = best_option.get("recommended_title", "Recommended Option")
-    best_reason = best_option.get("reasoning", "Adheres to security best practices and least privilege.")
+
+    parsed = parse_resource_display(resource_name, project_id)
+    clean_res = parsed["clean_resource_name"]
+    asset_type = parsed["asset_type"]
+    display_proj = parsed["project_id"]
 
     severity_icon = {
         "CRITICAL": "🔴",
@@ -265,132 +373,26 @@ def build_google_chat_payload(
         "LOW": "🔵",
     }.get(severity.upper(), "⚠️")
 
-    # Plaintext / markdown companion text for push alerts and mobile previews
-    markdown_lines = [
-        f"{severity_icon} *SecOps Alert:* `{issue_type}` ({severity})",
-        f"*Resource:* `{resource_name}`",
-        f"*Project:* `{project_id}`",
-        "",
-        "📋 *Issue Summary:*",
-        summary,
-        "",
-        f"⭐ *Recommended Fix (AI Choice):* *{best_title}*",
-        f"_{best_reason}_",
-        "",
-        "🛠️ *Fix Options:*"
-    ]
+    scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={display_proj}"
 
-    for idx, opt in enumerate(fix_options, 1):
-        opt_title = opt.get("title", f"Option {idx}")
-        strategy = opt.get("strategy", "")
-        trade_offs = opt.get("trade_offs") or opt.get("explanation") or ""
-        markdown_lines.append(f"\n*{idx}. {opt_title}*")
-        if strategy:
-            markdown_lines.append(strategy)
-        if trade_offs:
-            markdown_lines.append(f"_Trade-offs & Considerations:_ {trade_offs}")
-
-    markdown_lines.append("\n⚡ *Take Action (Click below or reply):*")
-    if receiver_url and finding_id:
-        for idx, opt in enumerate(fix_options, 1):
-            opt_num = opt.get("option_number", idx)
-            opt_title = opt.get("title", f"Option {opt_num}")
-            markdown_lines.append(f"• [🛠️ Code Fix Option {opt_num} ({opt_title})]({receiver_url}/?finding_id={finding_id}&option={opt_num})")
-        markdown_lines.append(f"• [🛑 Don't Act (Ignore Finding)]({receiver_url}/?finding_id={finding_id}&action=ignore)")
-    else:
-        markdown_lines.append("• Reply *\"Option 1\"* or *\"Option 2\"* to have the agent code the Terraform fix (safely staged).")
-        markdown_lines.append("• Reply *\"Don't act\"* or *\"Ignore\"* if you do not want to take action on this issue.")
-
-    full_markdown_text = "\n".join(markdown_lines)
-
-    # Google Chat Card V2
-    card_sections = []
-
-    # Section 1: Executive Summary
-    card_sections.append({
-        "header": "📋 Issue Summary",
-        "widgets": [
-            {
-                "textParagraph": {
-                    "text": f"<b>Resource:</b> <code>{resource_name}</code><br><br>{summary}"
-                }
-            }
-        ]
-    })
-
-    # Section 2: Best Fix Recommendation (Highlighted)
-    card_sections.append({
-        "header": "⭐ Best Fix Recommendation (AI Choice)",
-        "widgets": [
-            {
-                "decoratedText": {
-                    "topLabel": "AI RECOMMENDED REMEDIATION",
-                    "text": f"<b>{best_title}</b>",
-                    "wrapText": True
-                }
-            },
-            {
-                "textParagraph": {
-                    "text": f"<b>Why this is best:</b><br>{best_reason}"
-                }
-            }
-        ]
-    })
-
-    # Section 3: Fix Options
-    option_widgets = []
-    for idx, opt in enumerate(fix_options, 1):
-        opt_title = opt.get("title", f"Option {idx}")
-        strategy = opt.get("strategy", "")
-        trade_offs = opt.get("trade_offs") or opt.get("explanation") or ""
-
-        text_content = f"<b>Option {idx}: {opt_title}</b>"
-        if strategy:
-            text_content += f"<br>{strategy}"
-        if trade_offs:
-            text_content += f"<br><font color=\"#555555\"><i>Trade-offs:</i> {trade_offs}</font>"
-
-        option_widgets.append({
-            "textParagraph": {
-                "text": text_content
-            }
-        })
-
-    card_sections.append({
-        "header": "🛠️ Fix Options",
-        "widgets": option_widgets
-    })
-
-    # Section 4: Reply Instructions
-    card_sections.append({
-        "header": "⚡ Next Steps / Reply Options",
-        "widgets": [
-            {
-                "textParagraph": {
-                    "text": (
-                        "💬 <b>How to respond:</b><br>"
-                        "• Click a button below or reply with <b>\"Option 1\"</b> / <b>\"Option 2\"</b> to have the agent write the Terraform code.<br>"
-                        "• Click <b>\"Don't Act\"</b> or reply with <b>\"Don't act\"</b> to dismiss."
-                    )
-                }
-            }
-        ]
-    })
-
-    # Section 5: Action Buttons (Interactive Links)
-    scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={project_id}"
     action_buttons = []
     if receiver_url and finding_id:
-        for idx, opt in enumerate(fix_options, 1):
-            opt_num = opt.get("option_number", idx)
-            action_buttons.append({
-                "text": f"🛠️ Code Option {opt_num}",
-                "onClick": {
-                    "openLink": {
-                        "url": f"{receiver_url}/?finding_id={finding_id}&option={opt_num}"
-                    }
+        action_buttons.append({
+            "text": "🛠️ Fix via Option 1",
+            "onClick": {
+                "openLink": {
+                    "url": f"{receiver_url}/?finding_id={finding_id}&option=1"
                 }
-            })
+            }
+        })
+        action_buttons.append({
+            "text": "🛠️ Fix via Option 2",
+            "onClick": {
+                "openLink": {
+                    "url": f"{receiver_url}/?finding_id={finding_id}&option=2"
+                }
+            }
+        })
         action_buttons.append({
             "text": "🛑 Don't Act",
             "onClick": {
@@ -399,8 +401,16 @@ def build_google_chat_payload(
                 }
             }
         })
+        action_buttons.append({
+            "text": "🔎 Show More Details",
+            "onClick": {
+                "openLink": {
+                    "url": f"{receiver_url}/?finding_id={finding_id}&action=show_details"
+                }
+            }
+        })
     action_buttons.append({
-        "text": "View in SCC Console",
+        "text": "↗️ Open SCC Console",
         "onClick": {
             "openLink": {
                 "url": scc_console_url
@@ -408,8 +418,85 @@ def build_google_chat_payload(
         }
     })
 
+    # Companion fallback text (USED ONLY IF Card V2 fails after retries)
+    fallback_lines = [
+        f"{severity_icon} *SecOps Alert:* `{issue_type}` ({severity})",
+        f"*Asset:* `{clean_res}` ({asset_type}) | *Project:* `{display_proj}`",
+        "",
+        f"*Issue & Risk:* {summary}",
+        "",
+        f"⭐ *Recommended Fix (Option {rec_opt_num}):* *{best_title}*",
+        f"_{ai_analysis.get('deep_architectural_reasoning', '')[:200]}..._",
+        "",
+        "⚡ *Take Action:*"
+    ]
+    if receiver_url and finding_id:
+        fallback_lines.append(f"• [🛠️ Fix via Option 1]({receiver_url}/?finding_id={finding_id}&option=1)")
+        fallback_lines.append(f"• [🛠️ Fix via Option 2]({receiver_url}/?finding_id={finding_id}&option=2)")
+        fallback_lines.append(f"• [🛑 Don't Act]({receiver_url}/?finding_id={finding_id}&action=ignore)")
+        fallback_lines.append(f"• [🔎 Show More Details]({receiver_url}/?finding_id={finding_id}&action=show_details)")
+        fallback_lines.append(f"• [↗️ Open SCC Console]({scc_console_url})")
+    fallback_markdown_text = "\n".join(fallback_lines)
+
+    # Google Chat Card V2
+    card_sections = []
+
+    # Section 1: Executive Overview
     card_sections.append({
-        "header": "🔗 One-Click Actions",
+        "header": "⚡ Security Issue Overview",
+        "widgets": [
+            {
+                "decoratedText": {
+                    "topLabel": f"AFFECTED {asset_type.upper()}",
+                    "text": f"<b>{clean_res}</b>",
+                    "bottomLabel": f"Project: {display_proj} &nbsp;|&nbsp; Severity: {severity}",
+                    "wrapText": True
+                }
+            },
+            {
+                "textParagraph": {
+                    "text": f"<b>Risk:</b> {summary}"
+                }
+            }
+        ]
+    })
+
+    # Section 2: Remediation Options
+    option_widgets = []
+    for opt in fix_options:
+        opt_num = opt.get("option_number", 1)
+        opt_title = opt.get("title", f"Option {opt_num}")
+        opt_summary = opt.get("summary") or opt.get("strategy") or ""
+        pros = opt.get("pros") or []
+        cons = opt.get("cons") or []
+
+        is_recommended = (opt_num == rec_opt_num)
+        rec_badge = " ⭐ <b>[AI RECOMMENDED]</b>" if is_recommended else ""
+
+        lines = [f"<b>Option {opt_num}: {opt_title}</b>{rec_badge}"]
+        if opt_summary:
+            lines.append(f"<i>{opt_summary}</i>")
+        if pros:
+            pros_str = " • " + " • ".join(pros)
+            lines.append(f"<font color=\"#2da44e\"><b>Pros:</b></font> {pros_str}")
+        if cons:
+            cons_str = " • " + " • ".join(cons)
+            lines.append(f"<font color=\"#cf222e\"><b>Cons:</b></font> {cons_str}")
+
+        option_widgets.append({
+            "textParagraph": {
+                "text": "<br>".join(lines)
+            }
+        })
+
+    card_sections.append({
+        "header": "🛠️ Terraform Fix Options",
+        "widgets": option_widgets
+    })
+
+    # Section 3: One-Click Actions
+    card_sections.append({
+        "header": "⚡ Take Action",
         "widgets": [
             {
                 "buttonList": {
@@ -422,11 +509,11 @@ def build_google_chat_payload(
     card_v2_payload = {
         "cardsV2": [
             {
-                "cardId": f"scc_alert_{sanitize_doc_id(issue_type)}",
+                "cardId": f"scc_alert_{sanitize_doc_id(issue_type)}_{finding_id}",
                 "card": {
                     "header": {
-                        "title": f"{severity_icon} Security Alert: {issue_type}",
-                        "subtitle": f"Severity: {severity} | Project: {project_id}",
+                        "title": f"{severity_icon} {issue_type}",
+                        "subtitle": f"{clean_res} ({asset_type}) • {display_proj}",
                         "imageUrl": "https://www.gstatic.com/images/branding/product/2x/security_48dp.png",
                         "imageType": "CIRCLE"
                     },
@@ -436,7 +523,7 @@ def build_google_chat_payload(
         ]
     }
 
-    return card_v2_payload, full_markdown_text
+    return card_v2_payload, fallback_markdown_text
 
 
 def dispatch_to_google_chat(webhook_url: str, payload: dict, fallback_text: Optional[str] = None) -> tuple[str, str]:
@@ -680,6 +767,9 @@ def process_scc_alert(cloud_event):
             "model": vertex_model,
             "location": vertex_location,
             "issue_summary": ai_analysis.get("issue_summary"),
+            "recommended_option_number": ai_analysis.get("recommended_option_number", 1),
+            "deep_architectural_reasoning": ai_analysis.get("deep_architectural_reasoning"),
+            "compliance_and_blast_radius": ai_analysis.get("compliance_and_blast_radius"),
             "fix_options": ai_analysis.get("fix_options"),
             "best_option": ai_analysis.get("best_option"),
             "raw_output": ai_analysis.get("raw_output")
