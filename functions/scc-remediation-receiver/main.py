@@ -500,7 +500,12 @@ Please check the files changed in this PR, review the Terraform diff, and merge/
 # -----------------------------------------------------------------------------
 # Dispatch Status to Google Chat Space
 # -----------------------------------------------------------------------------
-def notify_google_chat(webhook_url: str, text: str = "", card_payload: Optional[dict] = None) -> Tuple[str, str]:
+def notify_google_chat(
+    webhook_url: Optional[str] = None,
+    text: str = "",
+    card_payload: Optional[dict] = None,
+    thread_name: Optional[str] = None
+) -> Tuple[str, str]:
     """
     Posts an update notification or card back into the user's Google Chat space.
     Enforces:
@@ -508,18 +513,24 @@ def notify_google_chat(webhook_url: str, text: str = "", card_payload: Optional[
     - Webhook Resilience: Retries transient 5xx errors with exponential backoff (at least 2 attempts).
     - Plain-text fallback if card delivery fails.
     """
-    if not webhook_url or not webhook_url.strip():
+    target_webhook = (webhook_url or GOOGLE_CHAT_WEBHOOK_URL or os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")).strip()
+    if not target_webhook:
         logger.info("Google Chat webhook URL not set; notification skipped.")
         return ("SKIPPED", "No webhook URL configured.")
 
     headers = {"Content-Type": "application/json; charset=UTF-8"}
     last_err = ""
 
+    target_url = target_webhook
+    if thread_name:
+        sep = "&" if "?" in target_url else "?"
+        target_url = f"{target_url}{sep}messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+
     if card_payload:
         clean_card = {"cardsV2": card_payload.get("cardsV2", [])}
         for attempt in range(1, 3):
             try:
-                resp = requests.post(webhook_url.strip(), json=clean_card, headers=headers, timeout=10)
+                resp = requests.post(target_url, json=clean_card, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     logger.info(f"Google Chat Card V2 posted successfully (attempt {attempt}).")
                     return ("SUCCESS", "Card V2 dispatched.")
@@ -541,7 +552,7 @@ def notify_google_chat(webhook_url: str, text: str = "", card_payload: Optional[
     fallback_text = text or "SecOps notification: Status updated for security finding."
     for attempt in range(1, 3):
         try:
-            resp = requests.post(webhook_url.strip(), json={"text": fallback_text}, headers=headers, timeout=10)
+            resp = requests.post(target_url, json={"text": fallback_text}, headers=headers, timeout=10)
             if resp.status_code == 200:
                 logger.info("Google Chat text notification posted successfully.")
                 return ("SUCCESS_TEXT", "Text notification dispatched.")
