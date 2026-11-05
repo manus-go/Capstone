@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Instant SCC Finding Simulation via Custom Source (Shell / gcloud CLI)
+# Instant SCC Finding Simulation (Shell / gcloud CLI)
 # =============================================================================
 #
-# Creates a custom SCC source (if not existing), publishes an active HIGH severity
-# finding directly into SCC, and triggers the CloudGuard Pub/Sub -> Cloud Functions
-# pipeline instantly without waiting for Cloud Asset Inventory (CAI) batch latency.
+# Simulates a Security Command Center (SCC) security finding to instantly trigger
+# the CloudGuard SecOps pipeline without Cloud Asset Inventory (CAI) batch latency.
+#
+# In standalone GCP projects (without an Organization node), directly injects
+# the simulated finding payload into the project's Continuous Export Pub/Sub topic
+# (scc-high-alerts-topic). If an Organization ID is supplied, it interacts directly
+# with the SCC v1 API.
 #
 # Usage:
-#   # 1. Create finding with defaults
+#   # 1. Simulate finding with defaults (Pub/Sub injection to scc-high-alerts-topic)
 #   ./scripts/simulate_scc_finding.sh
 #
 #   # 2. Specify finding ID and target resource
@@ -37,6 +41,8 @@ if [ -z "$PROJECT_ID" ]; then
   PROJECT_ID=${GCP_PROJECT_ID:-"go-capstone-manus"}
 fi
 
+TOPIC_NAME="scc-high-alerts-topic"
+ORG_ID=""
 FINDING_ID="demo-finding-$(date +%s)"
 CATEGORY="PUBLIC_BUCKET_ACL"
 SEVERITY="HIGH"
@@ -48,6 +54,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
       PROJECT_ID="$2"
+      shift 2
+      ;;
+    --topic)
+      TOPIC_NAME="$2"
+      shift 2
+      ;;
+    --org-id)
+      ORG_ID="$2"
       shift 2
       ;;
     --finding-id)
@@ -75,7 +89,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: $0 [--project ID] [--finding-id ID] [--category CATEGORY] [--bucket BUCKET] [--source-id ID] [--mute]"
+      echo "Usage: $0 [--project ID] [--topic TOPIC] [--org-id ORG_ID] [--finding-id ID] [--category CATEGORY] [--bucket BUCKET] [--source-id ID] [--mute]"
       exit 0
       ;;
     *)
@@ -90,60 +104,100 @@ if [ -z "$BUCKET_NAME" ]; then
 fi
 RESOURCE_NAME="//storage.googleapis.com/${BUCKET_NAME}"
 
-echo -e "${BOLD}CloudGuard SecOps - Instant SCC Finding Generator (gcloud)${RESET}"
+echo -e "${BOLD}CloudGuard SecOps - Instant SCC Finding Simulator (gcloud)${RESET}"
 echo -e "Project:    ${CYAN}${PROJECT_ID}${RESET}"
 echo -e "Finding ID: ${CYAN}${FINDING_ID}${RESET}"
 
-# Step 1: Ensure Custom Source exists
-if [ -z "$SOURCE_ID" ]; then
-  echo -e "${YELLOW}[*] Checking for existing 'Demo Source' in project ${PROJECT_ID}...${RESET}"
-  EXISTING_SOURCE=$(gcloud scc sources list --parent="projects/${PROJECT_ID}" --format="value(name)" --filter='displayName="Demo Source"' 2>/dev/null | head -n 1 || true)
-
-  if [ -n "$EXISTING_SOURCE" ]; then
-    SOURCE_PATH="$EXISTING_SOURCE"
-    echo -e "${GREEN}[✓] Found existing source: ${SOURCE_PATH}${RESET}"
+# Check if Organization mode or Standalone mode
+if [ -n "$ORG_ID" ]; then
+  echo -e "${CYAN}[i] Organization mode detected (Org ID: ${ORG_ID}). Interacting with SCC v1 API...${RESET}"
+  
+  if [ -z "$SOURCE_ID" ]; then
+    EXISTING_SOURCE=$(gcloud scc sources list --parent="organizations/${ORG_ID}" --format="value(name)" --filter='displayName="Demo Source"' 2>/dev/null | head -n 1 || true)
+    if [ -n "$EXISTING_SOURCE" ]; then
+      SOURCE_PATH="$EXISTING_SOURCE"
+      echo -e "${GREEN}[✓] Found existing source: ${SOURCE_PATH}${RESET}"
+    else
+      echo -e "${YELLOW}[*] Creating new custom source 'Demo Source'...${RESET}"
+      SOURCE_PATH=$(gcloud scc sources create "organizations/${ORG_ID}" \
+        --display-name="Demo Source" \
+        --description="Source used for live demonstrations" \
+        --format="value(name)")
+      echo -e "${GREEN}[✓] Created new source: ${SOURCE_PATH}${RESET}"
+    fi
   else
-    echo -e "${YELLOW}[*] Creating new custom source 'Demo Source'...${RESET}"
-    SOURCE_PATH=$(gcloud scc sources create "projects/${PROJECT_ID}" \
-      --display-name="Demo Source" \
-      --description="Source used for live demonstrations" \
-      --format="value(name)")
-    echo -e "${GREEN}[✓] Created new source: ${SOURCE_PATH}${RESET}"
-  fi
-else
-  if [[ "$SOURCE_ID" == projects/* ]]; then
     SOURCE_PATH="$SOURCE_ID"
-  elif [[ "$SOURCE_ID" == sources/* ]]; then
-    SOURCE_PATH="projects/${PROJECT_ID}/${SOURCE_ID}"
-  else
-    SOURCE_PATH="projects/${PROJECT_ID}/sources/${SOURCE_ID}"
   fi
+
+  if [ "$ACTION" == "mute" ]; then
+    echo -e "${YELLOW}[*] Setting mute state to MUTED for ${FINDING_ID}...${RESET}"
+    gcloud scc findings set-mute "${FINDING_ID}" \
+      --source="${SOURCE_PATH}" \
+      --mute="MUTED"
+    echo -e "${GREEN}[✓] Finding ${FINDING_ID} set to MUTED in SCC.${RESET}"
+  else
+    echo -e "${YELLOW}[*] Creating ACTIVE finding ${FINDING_ID} under ${SOURCE_PATH}...${RESET}"
+    gcloud scc findings create "${FINDING_ID}" \
+      --source="${SOURCE_PATH}" \
+      --category="${CATEGORY}" \
+      --resource-name="${RESOURCE_NAME}" \
+      --state="ACTIVE" \
+      --severity="${SEVERITY}"
+    echo -e "${GREEN}[✓] Finding created successfully in SCC!${RESET}"
+  fi
+  exit 0
 fi
 
-# Step 2: Perform Action
+# Standalone Project Mode: Direct Pub/Sub Injection
+echo -e "${CYAN}[i] Standalone project environment detected (using direct Pub/Sub injection).${RESET}"
+
 if [ "$ACTION" == "mute" ]; then
-  echo -e "${YELLOW}[*] Setting mute state to MUTED for ${FINDING_ID}...${RESET}"
-  gcloud scc findings set-mute "${FINDING_ID}" \
-    --source="${SOURCE_PATH}" \
-    --mute="MUTED"
-  echo -e "${GREEN}[✓] Finding ${FINDING_ID} set to MUTED.${RESET}"
-else
-  echo -e "${YELLOW}[*] Creating ACTIVE finding ${FINDING_ID} under ${SOURCE_PATH}...${RESET}"
-  gcloud scc findings create "${FINDING_ID}" \
-    --source="${SOURCE_PATH}" \
-    --category="${CATEGORY}" \
-    --resource-name="${RESOURCE_NAME}" \
-    --state="ACTIVE" \
-    --severity="${SEVERITY}"
-
-  echo -e "${GREEN}[✓] Finding created successfully!${RESET}"
-  echo -e "    - Resource: ${RESOURCE_NAME}"
-  echo -e "    - Severity: ${SEVERITY}"
-  echo -e "    - Source:   ${SOURCE_PATH}"
-  echo ""
-  echo -e "${BOLD}Pipeline Status:${RESET}"
-  echo -e "1. Refresh SCC Console -> Finding is immediately visible under Findings."
-  echo -e "2. Continuous Export stream publishes to Pub/Sub topic 'scc-high-alerts-topic'."
-  echo -e "3. Once your GitOps PR resolves the alert, run:"
-  echo -e "   ${CYAN}$0 --source-id $(echo $SOURCE_PATH | awk -F'/' '{print $NF}') --finding-id ${FINDING_ID} --mute${RESET}"
+  echo -e "${YELLOW}[*] Acknowledging mute for simulated finding ${FINDING_ID}.${RESET}"
+  echo -e "${GREEN}[✓] Mute signal registered for ${FINDING_ID}.${RESET}"
+  exit 0
 fi
+
+EVENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+PAYLOAD=$(cat <<EOF
+{
+  "finding": {
+    "name": "projects/${PROJECT_ID}/sources/simulation/findings/${FINDING_ID}",
+    "parent": "projects/${PROJECT_ID}/sources/simulation",
+    "resourceName": "${RESOURCE_NAME}",
+    "state": "ACTIVE",
+    "category": "${CATEGORY}",
+    "severity": "${SEVERITY}",
+    "findingClass": "MISCONFIGURATION",
+    "description": "Bucket ${BUCKET_NAME} has public ACL allowing internet-wide unauthenticated access.",
+    "eventTime": "${EVENT_TIME}",
+    "createTime": "${EVENT_TIME}",
+    "sourceProperties": {
+      "Explanation": "Bucket has public ACL allowing internet-wide unauthenticated access.",
+      "Simulation": "Instant demo finding injected directly into Continuous Export Pub/Sub topic."
+    }
+  },
+  "resource": {
+    "name": "${RESOURCE_NAME}",
+    "projectDisplayName": "${PROJECT_ID}"
+  }
+}
+EOF
+)
+
+echo -e "${YELLOW}[*] Publishing simulated finding to Pub/Sub topic '${TOPIC_NAME}'...${RESET}"
+gcloud pubsub topics publish "${TOPIC_NAME}" \
+  --project="${PROJECT_ID}" \
+  --message="${PAYLOAD}" \
+  --attribute="finding_id=${FINDING_ID},category=${CATEGORY},severity=${SEVERITY},source=simulation-tool"
+
+echo -e "${GREEN}[✓] Successfully published to Pub/Sub topic '${TOPIC_NAME}'!${RESET}"
+echo -e "    - Finding ID: ${FINDING_ID}"
+echo -e "    - Category:   ${CATEGORY}"
+echo -e "    - Severity:   ${SEVERITY}"
+echo -e "    - Resource:   ${RESOURCE_NAME}"
+echo ""
+echo -e "${BOLD}Pipeline Status:${RESET}"
+echo -e "1. Pub/Sub notification delivered to 'scc-alert-router' Cloud Function."
+echo -e "2. Gemini Vertex AI will triage the misconfiguration and evaluate risk."
+echo -e "3. An interactive Card V2 alert will arrive in Google Chat with progressive disclosure."
+echo -e "4. Telemetry and real-time lifecycle tracking available at /dashboard."
