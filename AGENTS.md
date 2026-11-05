@@ -4,10 +4,19 @@
 - **Card Exclusivity**: When sending interactive Card V2 messages via incoming webhooks, the JSON payload MUST contain only `"cardsV2"`. Never include a top-level `"text"` field alongside `"cardsV2"`, as Google Chat renders both, creating duplicate text bubbles.
 - **Webhook Resilience**: Google Chat incoming webhooks may return transient 502/503 gateway errors. Always retry card delivery with exponential backoff (at least 2 attempts) before resorting to plain-text fallback.
 - **No Raw Code in Chat**: User-facing cards and chat messages must describe remediation actions strategically and architecturally without exposing raw HCL or code blocks. Raw code belongs exclusively in Git branches and Pull Requests.
+- **Progressive Disclosure in Chat**: The primary alert card must be scannable in 5 seconds (Severity, Category, parsed clean resource name, 1-sentence issue & risk summary, and 1-line Option summaries with `⭐ AI Recommended` on the preferred strategy). Detailed architectural justifications must be deferred to an in-chat follow-up Card V2 utilizing native collapsible sections (`collapsible: true`, `uncollapsibleWidgetsCount: 1`) or an interactive deep-dive inspector callback.
+- **Direct SCC Console Deep Link**: All finding alert cards must provide a direct URL link to the SCC Console findings dashboard (`https://console.cloud.google.com/security/command-center/findings?project={project_id}`).
 
 ## 2. Infrastructure as Code (IaC) & Remediation Policy
 - **Strictly Terraform**: All automated and suggested remediation options must be declarative Terraform (HCL) changes (e.g., resource arguments, IAM member bindings, encryption settings). Never suggest or generate Google Cloud Console steps or imperative `gcloud` CLI commands.
 - **Human-in-the-Loop GitOps**: Remediation code must NEVER be applied directly to cloud environments. Always stage code onto a dedicated branch and open a GitHub Pull Request for engineer review and approval.
+- **In-Place Baseline Modifications for True Git Diffs**: For realistic GitOps evaluations and demos, remediation agents should modify pre-existing baseline infrastructure files (e.g., `infrastructure/main.tf`) in the GitHub repository rather than exclusively committing new isolated files.
+- **GitHub Contents API Blob SHA Invariant**: When committing updates to an existing file in GitHub via `PUT /repos/{owner}/{repo}/contents/{path}`, the API requires passing the file's current commit blob `sha`. Omitting the blob SHA returns HTTP 422 Unprocessable Entity. The agent must first query `GET /repos/{owner}/{repo}/contents/{path}?ref={base_branch}` to extract the SHA prior to staging commits.
+- **Streamlined 4-Part Pull Request Format**: All automated GitHub Pull Request bodies must follow a direct, non-conversational 4-part structure:
+  1. **What is causing the issue**: 1-2 sentence concise summary of the misconfiguration.
+  2. **The Error / Risk**: Resource affected and security impact.
+  3. **Recommended Fix Applied**: Specific strategy and target file path.
+  4. **Call to Action**: Exactly: *"Please check the files changed in this PR, review the Terraform diff, and merge/apply to handle this."*
 - **Idempotency**: All webhook receivers and remediation executors must verify whether a finding has already been remediated or has an active PR before creating duplicate branches, PRs, or notifications.
 
 ## 3. Google Agent Development Kit (ADK) Guidelines
@@ -27,14 +36,19 @@
 - **Sub-50ms Initial Response**: When an operator navigates to or clicks a Cloud Run webhook receiver from a browser (`GET` with `text/html` accept header), the service must immediately return a lightweight interactive loading page (`< 50ms`) rather than blocking the HTTP connection during agent reasoning.
 - **Client-Side Background Execution**: The loading UI must trigger the actual agent execution via asynchronous background `fetch(...?action=execute)` while rendering an animated progress bar and pipeline step checklist.
 - **Review Dashboard Completeness**: Upon completion, the UI must display the GitHub PR link, committed branch, target file, architectural rationale, and a read-only HCL code viewer tagged with `Safely Staged • NOT Applied`.
+- **Progressive Disclosure via Accordions**: Completed remediation screens must eliminate walls of text. Heavy technical details must be organized into clean collapsible `<details class="accordion">` components:
+  1. 💡 *Architectural Reasoning & Trade-Offs*
+  2. 🛡️ *Compliance & Workload Blast Radius Analysis*
+  3. 📦 *Staged Terraform HCL Preview* (badged `Safely Staged • NOT Applied`)
 
 ## 7. Autonomous ADK Multi-Tool GitOps Execution Order
-- **Sequential Tool Chain**: Autonomous ADK remediation agents must enforce a strict 5-step operational pipeline:
-  1. Generate complete declarative Terraform code with inline remediation comments.
-  2. Invoke `validate_terraform_code` to verify syntax, required HCL blocks, and brace matching.
-  3. Invoke `create_github_pull_request_tool` to create a dedicated branch, commit HCL, and open a PR.
-  4. Invoke `record_remediation_audit` to persist audit records in `alerts/` and `remediations/`.
-  5. Invoke `dispatch_google_chat_notification` to broadcast PR details without raw code to Google Chat.
+- **Sequential Tool Chain**: Autonomous ADK remediation agents must enforce a strict 6-step operational pipeline:
+  1. Fetch existing baseline Terraform code and commit blob SHA from GitHub (`infrastructure/main.tf`).
+  2. Generate complete declarative Terraform code refactoring the baseline in-place with inline remediation comments.
+  3. Invoke `validate_terraform_code` to verify syntax, required HCL blocks, and brace matching.
+  4. Invoke `create_github_pull_request_tool` specifying `existing_file_sha` to stage a true red/green diff on a dedicated branch.
+  5. Invoke `record_remediation_audit` to persist audit records in `alerts/` and `remediations/`.
+  6. Invoke `dispatch_google_chat_notification` to broadcast PR details without raw code to Google Chat.
 - **Pre-Execution Idempotency Gate**: Webhook handlers must check `alert_data["remediation_status"] == "PR_OPENED"` and `existing_pr_url` prior to initializing the ADK runner, immediately returning the existing PR to avoid duplicate branches, commits, or notifications.
 
 ## 8. Security Finding Simulation & Test Harness Invariants
@@ -43,9 +57,19 @@
 - **Dual-Mode Simulation & CAI Latency Awareness**:
   1. *Physical Infrastructure Mode*: Simulates real misconfigured cloud assets (e.g. buckets with public ACLs). Documentation must explicitly note the Cloud Asset Inventory (CAI) mixed-mode scanning model, where Security Health Analytics (SHA) batch scanning cycles introduce a 10–30+ minute detection lag.
   2. *Instant Custom Source Mode*: For live demonstrations, evaluator walkthroughs, or fast CI test suites requiring deterministic sub-second triggers, simulation scripts must support direct event injection into a project-level Custom Finding Source (`projects/{project_id}/sources/{source_id}`) with `state="ACTIVE"`, bypassing CAI scan latency and immediately triggering Continuous Export Pub/Sub pipelines.
+- **Standalone Project Simulation (Direct Pub/Sub Injection)**: In standalone GCP projects lacking an Organization node (`organization_id = ""`), the Security Command Center v1 REST API rejects custom source creation (`/v1/projects/{project_id}/sources` returns HTTP 404). For sub-second, deterministic test harnesses in standalone environments, simulation scripts must support direct event publication to the project's Continuous Export Pub/Sub topic (`scc-high-alerts-topic`), ensuring instant pipeline triggering without CAI batch scan latency.
 - **Finding Lifecycle & Dashboard Hygiene**: Finding simulation tools must provide automated lifecycle controls (`--mute` via `set-mute` / `POST :setMute` with `mute="MUTED"`, or `--inactive`) to clear resolved alerts from active SCC console dashboards without leaving lingering security noise.
 - **Detector Semantics & Documentation**: Each simulation toolchain must be documented in `scripts/README.md` defining:
   1. The exact SCC detector ID and trigger conditions (e.g. UBLA disabled, PAP inherited).
   2. Public principal semantics (distinguishing unauthenticated internet `allUsers` from authenticated accounts `allAuthenticatedUsers`).
   3. Declarative Terraform (HCL) remediation snippet adhering to Section 2.
 
+## 9. Hybrid Telemetry & SecOps Command Dashboard Invariants
+- **Domain-Specific KPI Data Sourcing**: SecOps dashboards must partition metrics by their native operational strengths:
+  1. **Immutable Ingestion Telemetry (BigQuery)**: BigQuery (`secops_lake.scc_findings_raw`) is the authoritative source for total ingested event volume, long-term multi-day telemetry, and raw finding distribution by severity.
+  2. **Real-Time Lifecycle State (Cloud Firestore)**: Firestore (`alerts` and `remediations`) is the authoritative source for low-latency point lookups, operational workflow states (`NOTIFIED`, `PR_OPENED`, `DISMISSED_NO_ACTION`), and Mean Time to Remediation (MTTR) tracking.
+- **4-Stage Lifecycle Audit Trail**: Finding audit records must track and display 4 sequential lifecycle stages with exact UTC timestamps:
+  1. *SCC Ingestion & Event Detection*
+  2. *Gemini Vertex AI Triage & Google Chat Dispatch*
+  3. *Operator Decision & Action Chosen*
+  4. *Autonomous ADK GitOps Execution & PR Creation*
