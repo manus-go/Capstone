@@ -1,3 +1,4 @@
+
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
@@ -42,17 +43,15 @@ resource "google_storage_bucket" "compliant_analytics_data" {
 }
 
 # Vulnerable Storage Bucket: Triggering SCC detector PUBLIC_BUCKET_ACL
-# Notice: uniform_bucket_level_access is false, allowing legacy ACLs.
+# Remediation: Enabled Uniform Bucket-Level Access to eliminate public ACLs and enforce IAM-based access control.
 resource "google_storage_bucket" "vulnerable_public_data" {
   name                        = "${var.project_id}-demo-public-bucket"
   location                    = var.region
-  uniform_bucket_level_access = false
+  # Set uniform_bucket_level_access to true to disable object ACLs and centralize permissions with IAM.
+  uniform_bucket_level_access = true
   force_destroy               = true
 }
 
-# Vulnerable ACL binding exposing the bucket to the entire internet
-resource "google_storage_bucket_access_control" "public_bucket_acl" {
-  bucket = google_storage_bucket.vulnerable_public_data.name
-  role   = "READER"
-  entity = "allUsers"
-}
+# The previous google_storage_bucket_access_control resource for "allUsers" is removed
+# because Uniform Bucket-Level Access centralizes access control through IAM policies,
+# making object ACLs, including public ones, ineffective and unnecessary.
