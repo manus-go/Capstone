@@ -4,6 +4,12 @@
 - **Card Exclusivity**: When sending interactive Card V2 messages via incoming webhooks, the JSON payload MUST contain only `"cardsV2"`. Never include a top-level `"text"` field alongside `"cardsV2"`, as Google Chat renders both, creating duplicate text bubbles.
 - **Webhook Resilience**: Google Chat incoming webhooks may return transient 502/503 gateway errors. Always retry card delivery with exponential backoff (at least 2 attempts) before resorting to plain-text fallback.
 - **No Raw Code in Chat**: User-facing cards and chat messages must describe remediation actions strategically and architecturally without exposing raw HCL or code blocks. Raw code belongs exclusively in Git branches and Pull Requests.
+- **Markdown Formatting Divergence**: Never send raw CommonMark syntax into Google Chat:
+  1. *Plain text notifications*: Use single-asterisk `*bold*`, unicode `• ` bullets, and `<url|text>` link syntax. Never use `**bold**` or `*   ` list indentation.
+  2. *Card V2 textParagraph widgets*: Use supported subset HTML (`<b>bold</b>`, `<i>italic</i>`, `<a href="...">text</a>`, and `• ` with `<br>` line breaks).
+  3. *Deterministic Sanitization*: All automated messages and card paragraphs must pass through dedicated sanitizers (`format_google_chat_markdown` and `format_chat_card_html`) prior to dispatch to prevent raw asterisks from rendering.
+- **Minimalistic PR Confirmation Card (No External Logos)**: PR staging confirmations must use a clean, distraction-free Card V2 layout featuring key-value summary attributes, an interactive "Review PR #{pr_number} on GitHub →" text button, and a safety status badge. Do NOT include third-party logo images (specifically NO GitHub Octocat logo).
+- **Deep Dive Channel Separation**: When an operator clicks "Show More Details", the service must render exclusively the browser deep-dive inspection webpage. Redundant follow-up companion cards or notification bubbles in Google Chat must be completely suppressed.
 - **Progressive Disclosure in Chat**: The primary alert card must be scannable in 5 seconds (Severity, Category, parsed clean resource name, 1-sentence issue & risk summary, and 1-line Option summaries with `⭐ AI Recommended` on the preferred strategy). Detailed architectural justifications must be deferred to an in-chat follow-up Card V2 utilizing native collapsible sections (`collapsible: true`, `uncollapsibleWidgetsCount: 1`) or an interactive deep-dive inspector callback.
 - **Direct SCC Console Deep Link**: All finding alert cards must provide a direct URL link to the SCC Console findings dashboard (`https://console.cloud.google.com/security/command-center/findings?project={project_id}`).
 
@@ -34,6 +40,12 @@
 
 ## 6. Two-Phase Browser Webhook & Staging UI Invariants
 - **Sub-50ms Initial Response**: When an operator navigates to or clicks a Cloud Run webhook receiver from a browser (`GET` with `text/html` accept header), the service must immediately return a lightweight interactive loading page (`< 50ms`) rather than blocking the HTTP connection during agent reasoning.
+- **Solving Orb Canvas Engine & SSE Streaming**: Staging screens and agent cognitive wait states must render the 2D canvas **Solving Orb** particle field configured with CloudGuard's palette:
+  - *Orbital trails*: Electric Blue (`#38bdf8` / `rgba(56, 189, 248, 0.85)`)
+  - *Harmonic core*: Emerald Green (`#10b981` / `rgba(16, 185, 129, 0.90)`)
+  - *Ambient glow*: Dark Slate / Indigo (`rgba(14, 165, 233, 0.15)`)
+- **Server-Sent Events (SSE) Progress**: Multi-step remediation pipelines must stream milestone events (`text/event-stream`) to dynamically update orb status text and pipeline step indicators without page reloads.
+- **Concurrent Post-PR I/O**: After opening a GitHub PR, non-dependent persistence (Firestore audit) and external notifications (Google Chat) must execute concurrently via a thread pool to minimize operator wait time.
 - **Client-Side Background Execution**: The loading UI must trigger the actual agent execution via asynchronous background `fetch(...?action=execute)` while rendering an animated progress bar and pipeline step checklist.
 - **Review Dashboard Completeness**: Upon completion, the UI must display the GitHub PR link, committed branch, target file, architectural rationale, and a read-only HCL code viewer tagged with `Safely Staged • NOT Applied`.
 - **Progressive Disclosure via Accordions**: Completed remediation screens must eliminate walls of text. Heavy technical details must be organized into clean collapsible `<details class="accordion">` components:
@@ -76,3 +88,5 @@
   2. *Gemini Vertex AI Triage & Google Chat Dispatch*
   3. *Operator Decision & Action Chosen*
   4. *Autonomous ADK GitOps Execution & PR Creation*
+- **DOM Entity Hygiene**: Dynamic JavaScript DOM updates must never inject raw HTML character entities (such as `&rarr;`) through `.innerText` or `.textContent`. Always use literal unicode glyphs (`→`) or assign via `.innerHTML`.
+- **Fixed-Grid Actions Column Alignment**: Table actions containing conditional elements (e.g., `Review PR` and `📋 Audit Trail`) must enforce a fixed-column layout (such as a 2-column CSS Grid `140px 120px` with fixed slot widths). Even when findings do not have an open PR, slot 1 must maintain its width so that all `📋 Audit Trail` buttons in slot 2 remain strictly vertically aligned across all table rows.
