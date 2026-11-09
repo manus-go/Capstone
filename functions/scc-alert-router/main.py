@@ -338,6 +338,58 @@ Execute the publish_triage_assessment tool with your analysis.
     return triage_result
 
 
+def format_google_chat_markdown(text: str) -> str:
+    """
+    Converts CommonMark markdown into Google Chat compatible text formatting:
+    - Double asterisks **bold** converted to single asterisk *bold*
+    - Indented or unindented bullets (* , - , + ) converted to unicode bullet •
+    - Markdown links [text](url) converted to <url|text>
+    - Headings converted to *Heading*
+    Prevents raw asterisks (*   **Resource:**) from displaying in Google Chat.
+    """
+    if not text:
+        return ""
+    s = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
+    s = re.sub(r"__([^_]+)__", r"*\1*", s)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<\2|\1>", s)
+    s = re.sub(r"(?m)^[\s]*[\*\-\+]\s+", "• ", s)
+    s = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"*\1*", s)
+    return s.strip()
+
+
+def format_chat_card_html(text: str) -> str:
+    """
+    Converts markdown into Google Chat Card V2 compatible HTML:
+    - **bold** converted to <b>bold</b>
+    - *italic* converted to <i>italic</i>
+    - Bullets converted to • with <br> breaks
+    - [text](url) converted to <a href="...">text</a>
+    - `code` converted to <b>code</b> or monospace font
+    Prevents asterisks from rendering in Card V2 textParagraph widgets.
+    """
+    if not text:
+        return ""
+    lines = text.strip().split("\n")
+    processed_lines = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            processed_lines.append("")
+            continue
+        bullet_match = re.match(r"^[\*\-\+•]\s+(.+)$", s)
+        if bullet_match:
+            s = f"• {bullet_match.group(1)}"
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
+        s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", s)
+        s = re.sub(r"(?<!_)_([^_]+)_(?!_)", r"<i>\1</i>", s)
+        s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<a href=\"\2\">\1</a>", s)
+        s = re.sub(r"`([^`]+)`", r"<b>\1</b>", s)
+        processed_lines.append(s)
+
+    return "<br>".join(processed_lines)
+
+
 def build_google_chat_payload(
     issue_type: str,
     severity: str,
@@ -355,7 +407,7 @@ def build_google_chat_payload(
     - No raw code blocks in chat
     - Interactive links: Fix Option 1, Fix Option 2, Don't Act, Show More Details, and SCC Console
     """
-    summary = ai_analysis.get("issue_summary", "No summary provided.")
+    summary = format_chat_card_html(ai_analysis.get("issue_summary", "No summary provided."))
     fix_options = ai_analysis.get("fix_options", [])
     rec_opt_num = ai_analysis.get("recommended_option_number") or ai_analysis.get("best_option", {}).get("recommended_option_number", 1)
     best_option = ai_analysis.get("best_option", {})
@@ -466,7 +518,7 @@ def build_google_chat_payload(
     for opt in fix_options:
         opt_num = opt.get("option_number", 1)
         opt_title = opt.get("title", f"Option {opt_num}")
-        opt_summary = opt.get("summary") or opt.get("strategy") or ""
+        opt_summary = format_chat_card_html(opt.get("summary") or opt.get("strategy") or "")
         pros = opt.get("pros") or []
         cons = opt.get("cons") or []
 

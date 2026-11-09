@@ -1,10 +1,13 @@
 import base64
+import concurrent.futures
 import html
 import json
 import logging
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +19,12 @@ from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+try:
+    from flask import Response, stream_with_context
+except ImportError:
+    Response = None
+    stream_with_context = None
 
 # -----------------------------------------------------------------------------
 # Environment Loader
@@ -572,6 +581,259 @@ def notify_google_chat(
     return ("FAILED", last_err)
 
 
+def format_google_chat_markdown(text: str) -> str:
+    """
+    Converts CommonMark markdown into Google Chat compatible text formatting:
+    - Double asterisks **bold** converted to single asterisk *bold*
+    - Indented or unindented bullets (* , - , + ) converted to unicode bullet •
+    - Markdown links [text](url) converted to <url|text>
+    - Headings converted to *Heading*
+    Prevents raw asterisks (*   **Resource:**) from displaying in Google Chat.
+    """
+    if not text:
+        return ""
+    # Double asterisks/underscores to single
+    s = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
+    s = re.sub(r"__([^_]+)__", r"*\1*", s)
+    # Links [text](url) -> <url|text>
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<\2|\1>", s)
+    # Bullets * or - at start of lines -> unicode bullet •
+    s = re.sub(r"(?m)^[\s]*[\*\-\+]\s+", "• ", s)
+    # Headings -> bold line
+    s = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"*\1*", s)
+    return s.strip()
+
+
+def format_chat_card_html(text: str) -> str:
+    """
+    Converts markdown into Google Chat Card V2 compatible HTML:
+    - **bold** converted to <b>bold</b>
+    - *italic* converted to <i>italic</i>
+    - Bullets converted to • with <br> breaks
+    - [text](url) converted to <a href="...">text</a>
+    - `code` converted to <b>code</b> or monospace font
+    Prevents asterisks from rendering in Card V2 textParagraph widgets.
+    """
+    if not text:
+        return ""
+    lines = text.strip().split("\n")
+    processed_lines = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            processed_lines.append("")
+            continue
+        # Bullets
+        bullet_match = re.match(r"^[\*\-\+•]\s+(.+)$", s)
+        if bullet_match:
+            s = f"• {bullet_match.group(1)}"
+        # Bold
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"__([^_]+)__", r"<b>\1</b>", s)
+        # Italic
+        s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", s)
+        s = re.sub(r"(?<!_)_([^_]+)_(?!_)", r"<i>\1</i>", s)
+        # Links
+        s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<a href=\"\2\">\1</a>", s)
+        # Code
+        s = re.sub(r"`([^`]+)`", r"<b>\1</b>", s)
+        processed_lines.append(s)
+
+    return "<br>".join(processed_lines)
+
+
+def format_markdown_for_html(text: str) -> str:
+    """
+    Converts markdown text to clean semantic HTML for browser display:
+    - Escapes raw HTML to prevent injection
+    - Converts **bold** to <strong>bold</strong>
+    - Converts *italic* to <em>italic</em>
+    - Converts `code` to <code>code</code>
+    - Converts [text](url) and bare URLs to <a> links
+    - Groups * and - bullets into semantic <ul><li>...</li></ul>
+    - Groups 1. numbered items into <ol><li>...</li></ol>
+    - Formats paragraphs cleanly with proper line-height
+    """
+    if not text:
+        return ""
+
+    def process_inline(s: str) -> str:
+        s = re.sub(r"`([^`]+)`", r"<code style=\"background-color: rgba(110, 118, 129, 0.2); padding: 2px 6px; border-radius: 4px; font-family: monospace; color: #79c0ff;\">\1</code>", s)
+        s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+        s = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", s)
+        s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", s)
+        s = re.sub(r"(?<!_)_([^_]+)_(?!_)", r"<em>\1</em>", s)
+        s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<a href=\"\2\" target=\"_blank\" style=\"color: #58a6ff; text-decoration: underline;\">\1</a>", s)
+        s = re.sub(r"(?<!href=\")(?<!\">)(https?://[^\s<>]+)", r"<a href=\"\1\" target=\"_blank\" style=\"color: #58a6ff; text-decoration: underline;\">\1</a>", s)
+        return s
+
+    raw_lines = text.strip().split("\n")
+    output = []
+    in_ul = False
+    in_ol = False
+    p_buffer = []
+
+    def flush_p():
+        nonlocal p_buffer
+        if p_buffer:
+            content = "<br>".join(p_buffer)
+            output.append(f"<p style=\"margin: 8px 0; line-height: 1.6;\">{content}</p>")
+            p_buffer = []
+
+    def close_lists():
+        nonlocal in_ul, in_ol
+        if in_ul:
+            output.append("</ul>")
+            in_ul = False
+        if in_ol:
+            output.append("</ol>")
+            in_ol = False
+
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            flush_p()
+            close_lists()
+            continue
+
+        # Bullet list item: starts with * or - or + or • followed by space
+        bullet_match = re.match(r"^[\*\-\+•]\s+(.+)$", stripped)
+        if bullet_match:
+            flush_p()
+            if in_ol:
+                output.append("</ol>")
+                in_ol = False
+            if not in_ul:
+                output.append("<ul style=\"margin: 8px 0; padding-left: 20px; line-height: 1.6;\">")
+                in_ul = True
+            item_content = process_inline(html.escape(bullet_match.group(1)))
+            output.append(f"<li>{item_content}</li>")
+            continue
+
+        # Numbered list item: starts with 1. or 1)
+        num_match = re.match(r"^\d+[\.\)]\s+(.+)$", stripped)
+        if num_match:
+            flush_p()
+            if in_ul:
+                output.append("</ul>")
+                in_ul = False
+            if not in_ol:
+                output.append("<ol style=\"margin: 8px 0; padding-left: 20px; line-height: 1.6;\">")
+                in_ol = True
+            item_content = process_inline(html.escape(num_match.group(1)))
+            output.append(f"<li>{item_content}</li>")
+            continue
+
+        # Heading
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_match:
+            flush_p()
+            close_lists()
+            level = len(heading_match.group(1))
+            h_content = process_inline(html.escape(heading_match.group(2)))
+            output.append(f"<h{min(level+2, 5)} style=\"margin: 12px 0 6px 0; color: #ffffff;\">{h_content}</h{min(level+2, 5)}>")
+            continue
+
+        close_lists()
+        p_buffer.append(process_inline(html.escape(stripped)))
+
+    flush_p()
+    close_lists()
+    return "\n".join(output)
+
+
+def build_pr_confirmation_card(
+    finding_id: str,
+    issue_type: str,
+    resource_name: str,
+    project_id: str,
+    option_number: int,
+    option_title: str,
+    pr_number: Optional[int] = None,
+    pr_url: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    file_path: Optional[str] = None,
+    is_diff: bool = True,
+    additional_notes: str = ""
+) -> dict:
+    """
+    Constructs a minimalistic Google Chat Card V2 for the PR confirmation notification.
+    Adheres strictly to user requirements:
+    - Minimalistic styling without GitHub logo or distracting graphics.
+    - Native Card V2 structure with styled key-value fields (Resource, Remediation, Branch, File).
+    - Direct 'Review PR on GitHub' interactive button.
+    - Card Exclusivity (only 'cardsV2').
+    """
+    parsed = parse_resource_display(resource_name, project_id)
+    clean_res = parsed["clean_resource_name"]
+    asset_type = parsed["asset_type"]
+    display_proj = parsed["project_id"]
+
+    header = {
+        "title": "✅ Remediation PR Staged",
+        "subtitle": f"{clean_res} • {display_proj}"
+    }
+
+    diff_mode_label = "Modified In-Place Baseline" if is_diff else "Staged New File"
+    widgets = [
+        {
+            "decoratedText": {
+                "topLabel": f"TARGET {asset_type.upper()}",
+                "text": f"<b>{clean_res}</b>",
+                "bottomLabel": f"Project: {display_proj} &nbsp;|&nbsp; Severity: HIGH",
+                "wrapText": True
+            }
+        },
+        {
+            "textParagraph": {
+                "text": (
+                    f"<b>Remediation:</b> Option {option_number}: {option_title}<br>"
+                    f"<b>Branch:</b> <code>{branch_name or 'N/A'}</code><br>"
+                    f"<b>Target File:</b> <code>{file_path or 'infrastructure/main.tf'}</code> <i>({diff_mode_label})</i>"
+                )
+            }
+        }
+    ]
+
+    if pr_url and pr_number:
+        widgets.append({
+            "buttonList": {
+                "buttons": [
+                    {
+                        "text": f"Review PR #{pr_number} on GitHub →",
+                        "onClick": {
+                            "openLink": {
+                                "url": pr_url
+                            }
+                        }
+                    }
+                ]
+            }
+        })
+
+    widgets.append({
+        "textParagraph": {
+            "text": "<font color=\"#8b949e\">🔒 <b>Safety Policy:</b> Staged on dedicated Git branch for human review. <b>NOT applied</b> to live infrastructure.</font>"
+        }
+    })
+
+    return {
+        "cardsV2": [
+            {
+                "cardId": f"pr_confirm_{sanitize_doc_id(finding_id)}_{option_number}",
+                "card": {
+                    "header": header,
+                    "sections": [
+                        {
+                            "widgets": widgets
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+
 def build_deep_dive_chat_card(
     finding_id: str,
     issue_type: str,
@@ -600,9 +862,9 @@ def build_deep_dive_chat_card(
         "LOW": "🔵",
     }.get(severity.upper(), "⚠️")
 
-    deep_reasoning = ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided."
-    compliance = ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark."
-    issue_summary = ai_analysis.get("issue_summary") or "Security Command Center finding detected."
+    deep_reasoning = format_chat_card_html(ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided.")
+    compliance = format_chat_card_html(ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark.")
+    issue_summary = format_chat_card_html(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
     rec_opt = ai_analysis.get("recommended_option_number") or ai_analysis.get("best_option", {}).get("recommended_option_number", 1)
 
     scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={display_proj}"
@@ -729,7 +991,8 @@ def run_scc_remediation_agent(
     github_repo: str,
     github_token: str,
     github_base_branch: str,
-    chat_webhook_url: str
+    chat_webhook_url: str,
+    progress_callback: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Invokes the Google Agent Development Kit (ADK) autonomous Remediation Agent
@@ -802,6 +1065,17 @@ def run_scc_remediation_agent(
         agent_state["terraform_code"] = terraform_code
         agent_state["resource_type"] = resource_type
         logger.info(f"ADK Tool [validate_terraform_code]: Validated {len(terraform_code)} chars for {resource_type}.")
+        if progress_callback:
+            try:
+                progress_callback(
+                    step_num=3,
+                    pct=45,
+                    status_text=f"Validated Terraform HCL syntax for {resource_type} ({open_braces} blocks)",
+                    step_text=f"Terraform HCL syntax and structure validated ({open_braces} blocks).",
+                    orb_status="Validating Infrastructure HCL"
+                )
+            except Exception as pe:
+                logger.debug(f"Progress callback notification error: {pe}")
         return {
             "valid": True,
             "status": "VALID",
@@ -833,6 +1107,18 @@ def run_scc_remediation_agent(
             agent_state["pr_result"] = {"success": False, "skipped": True, "error": "GitHub credentials not configured"}
             return {"success": False, "status": "SKIPPED", "message": "GitHub repository/token not configured; staging in Firestore only."}
 
+        if progress_callback:
+            try:
+                progress_callback(
+                    step_num=4,
+                    pct=70,
+                    status_text="Staging Terraform configuration to dedicated GitOps branch...",
+                    step_text="Committing code and opening Pull Request via GitHub REST API...",
+                    orb_status="Staging Pull Request"
+                )
+            except Exception as pe:
+                logger.debug(f"Progress callback notification error: {pe}")
+
         chosen_path = file_path.strip() if file_path and file_path.strip() else target_file_path
         chosen_sha = baseline_sha if (chosen_path == "infrastructure/main.tf" and baseline_sha) else None
 
@@ -857,6 +1143,62 @@ def run_scc_remediation_agent(
         )
         agent_state["pr_result"] = pr_res
         logger.info(f"ADK Tool [create_github_pull_request_tool]: PR Result: success={pr_res.get('success')} (PR #{pr_res.get('pr_number')})")
+
+        # Parallelize Post-PR operations (Firestore audit recording + Google Chat notification)
+        logger.info("Executing post-PR tasks (Firestore audit + Chat notification) in parallel...")
+        def _parallel_audit():
+            return record_remediation_audit(
+                audit_status="PR_OPENED_NOT_APPLIED" if pr_res.get("success") else "CODE_GENERATED_STAGED",
+                audit_notes="Autonomous audit recorded concurrently with chat notification."
+            )
+
+        def _parallel_chat():
+            if not agent_state.get("chat_msg_text"):
+                if pr_res.get("success") and pr_res.get("pr_url"):
+                    c_msg = (
+                        f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
+                        f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                        f"• *Pull Request:* <{pr_res.get('pr_url')}|PR #{pr_res.get('pr_number')}: [SecOps Fix] Remediate {issue_type}>\n"
+                        f"• *Branch:* `{pr_res.get('branch_name')}`\n"
+                        f"• *File:* `{pr_res.get('file_path')}`\n\n"
+                        f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
+                        f"It *has NOT been applied* to live infrastructure."
+                    )
+                else:
+                    c_msg = (
+                        f"✅ *Terraform Fix Prepared!*\n\n"
+                        f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                        f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
+                    )
+                agent_state["chat_msg_text"] = c_msg
+            return dispatch_google_chat_notification(agent_state["chat_msg_text"])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as post_executor:
+            fut_audit = post_executor.submit(_parallel_audit)
+            fut_chat = post_executor.submit(_parallel_chat)
+            try:
+                fut_audit.result(timeout=15)
+            except Exception as ex:
+                logger.error(f"Parallel audit recording error: {ex}")
+            try:
+                fut_chat.result(timeout=15)
+            except Exception as ex:
+                logger.error(f"Parallel chat notification error: {ex}")
+
+        if progress_callback:
+            try:
+                progress_callback(
+                    step_num=5,
+                    pct=92,
+                    status_text="Audit trail persisted & Google Chat notified concurrently.",
+                    step_text="Firestore audit persisted and Google Chat notification dispatched.",
+                    orb_status="Remediation Finalized"
+                )
+            except Exception as pe:
+                logger.debug(f"Progress callback notification error: {pe}")
+
         return pr_res
 
     # Tool 3: record_remediation_audit
@@ -870,6 +1212,10 @@ def run_scc_remediation_agent(
             audit_status: High-level status of the remediation (e.g. PR_OPENED_NOT_APPLIED or CODE_GENERATED_STAGED).
             audit_notes: Technical summary of the remediation actions taken by the agent.
         """
+        if agent_state.get("audit_result"):
+            logger.info("ADK Tool [record_remediation_audit]: Already recorded; returning cached result.")
+            return agent_state["audit_result"]
+
         tf_code = agent_state.get("terraform_code", "")
         pr_res = agent_state.get("pr_result") or {}
         pr_success = bool(pr_res.get("success"))
@@ -930,12 +1276,39 @@ def run_scc_remediation_agent(
         Args:
             notification_message: Formatted text or markdown notification to broadcast to the Google Chat space.
         """
+        if agent_state.get("chat_notified"):
+            logger.info("ADK Tool [dispatch_google_chat_notification]: Already notified; returning cached result.")
+            return {"status": "SUCCESS", "message": "Notification already dispatched."}
+
         agent_state["chat_msg_text"] = notification_message
         if not chat_webhook_url or not chat_webhook_url.strip():
             logger.info("ADK Tool [dispatch_google_chat_notification]: Chat webhook URL not set; skipped.")
             return {"status": "SKIPPED", "reason": "No webhook URL provided"}
 
-        notify_google_chat(chat_webhook_url, notification_message)
+        pr_res = agent_state.get("pr_result") or {}
+        pr_card = None
+        if pr_res.get("pr_url"):
+            pr_card = build_pr_confirmation_card(
+                finding_id=finding_id,
+                issue_type=issue_type,
+                resource_name=resource_name,
+                project_id=project_id,
+                option_number=target_num,
+                option_title=selected_option.get("title", f"Option {target_num}"),
+                pr_number=pr_res.get("pr_number"),
+                pr_url=pr_res.get("pr_url"),
+                branch_name=pr_res.get("branch_name"),
+                file_path=pr_res.get("file_path"),
+                is_diff=bool(pr_res.get("is_diff")),
+                additional_notes=notification_message
+            )
+
+        clean_text = format_google_chat_markdown(notification_message)
+        notify_google_chat(
+            webhook_url=chat_webhook_url,
+            text=clean_text,
+            card_payload=pr_card
+        )
         agent_state["chat_notified"] = True
         logger.info("ADK Tool [dispatch_google_chat_notification]: Dispatched to Google Chat.")
         return {"status": "SUCCESS", "message": "Notification dispatched to Google Chat space."}
@@ -953,7 +1326,7 @@ def run_scc_remediation_agent(
         "2. Call `validate_terraform_code` to verify the HCL syntax and structural integrity.\n"
         "3. Call `create_github_pull_request_tool` to commit the code onto a dedicated branch and open a PR.\n"
         "4. Call `record_remediation_audit` to write the full audit trail and PR metadata to Firestore.\n"
-        "5. Call `dispatch_google_chat_notification` to notify the team in Google Chat with the PR link and human review safety assurance (the code is staged in Git and has NOT been applied to live infrastructure).\n"
+        "5. Call `dispatch_google_chat_notification` to notify the team in Google Chat with the PR link and human review safety assurance (staged in Git, NOT applied). When formatting the notification message, do NOT use CommonMark double asterisks (**word**) or indented asterisk bullets (*   item). Use Google Chat formatting: single asterisk for bold (*word*), bullet symbols (• item), and clean key-value lines.\n"
         "6. Provide a crisp, professional 2-3 sentence executive engineering rationale summarizing: (1) root misconfiguration eliminated, (2) architectural trade-offs, and (3) expected blast radius. Avoid meta-commentary, fluff, and filler words."
     )
 
@@ -1034,11 +1407,7 @@ Execute the required steps using your tools now.
             f"Zero fallback policy enforced. Raw output: {raw_response_text[:300]}"
         )
 
-    # Guarantee audit recording if tool step was skipped by model
-    if not agent_state.get("audit_result"):
-        record_remediation_audit("PR_OPENED_NOT_APPLIED", "Autonomous audit recorded via remediation pipeline.")
-
-    # Guarantee chat notification if tool step was skipped by model
+    # Guarantee audit recording and chat notification in parallel if skipped by model
     pr_res = agent_state.get("pr_result") or {}
     pr_success = bool(pr_res.get("success"))
     pr_url = pr_res.get("pr_url")
@@ -1046,29 +1415,49 @@ Execute the required steps using your tools now.
     branch_name = pr_res.get("branch_name")
     file_path = pr_res.get("file_path")
 
-    if not agent_state.get("chat_msg_text"):
-        if pr_success and pr_url:
-            chat_msg = (
-                f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
-                f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
-                f"🌿 *Branch:* `{branch_name}`\n"
-                f"📁 *File:* `{file_path}`\n\n"
-                f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
-                f"It *has NOT been applied* to live infrastructure."
-            )
-        else:
-            chat_msg = (
-                f"✅ *Terraform Fix Prepared!*\n\n"
-                f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
-            )
-        agent_state["chat_msg_text"] = chat_msg
-        if not agent_state.get("chat_notified") and chat_webhook_url:
-            notify_google_chat(chat_webhook_url, chat_msg)
-            agent_state["chat_notified"] = True
+    need_audit = not bool(agent_state.get("audit_result"))
+    need_chat = not bool(agent_state.get("chat_notified")) and bool(chat_webhook_url)
+
+    if need_audit or need_chat:
+        logger.info(f"Executing pending post-agent guarantees in parallel (audit={need_audit}, chat={need_chat})...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as guarantee_executor:
+            g_futs = []
+            if need_audit:
+                g_futs.append(guarantee_executor.submit(
+                    record_remediation_audit,
+                    "PR_OPENED_NOT_APPLIED" if pr_success else "CODE_GENERATED_STAGED",
+                    "Autonomous audit recorded via remediation pipeline guarantee."
+                ))
+            if need_chat:
+                if not agent_state.get("chat_msg_text"):
+                    if pr_success and pr_url:
+                        chat_msg = (
+                            f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
+                            f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                            f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                            f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
+                            f"🌿 *Branch:* `{branch_name}`\n"
+                            f"📁 *File:* `{file_path}`\n\n"
+                            f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
+                            f"It *has NOT been applied* to live infrastructure."
+                        )
+                    else:
+                        chat_msg = (
+                            f"✅ *Terraform Fix Prepared!*\n\n"
+                            f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                            f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                            f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
+                        )
+                    agent_state["chat_msg_text"] = chat_msg
+                g_futs.append(guarantee_executor.submit(
+                    dispatch_google_chat_notification,
+                    agent_state["chat_msg_text"]
+                ))
+            for f in g_futs:
+                try:
+                    f.result(timeout=15)
+                except Exception as ex:
+                    logger.error(f"Post-agent guarantee execution error: {ex}")
 
     if not agent_state.get("explanation"):
         agent_state["explanation"] = raw_response_text or f"Autonomous Terraform remediation implementing Option {target_num}: {selected_option.get('title')}."
@@ -1101,7 +1490,7 @@ def render_html_page(
                 <span class="chevron">▾</span>
             </summary>
             <div class="accordion-body">
-                {html.escape(explanation)}
+                {format_markdown_for_html(explanation)}
             </div>
         </details>
         """
@@ -1400,9 +1789,9 @@ def render_deep_dive_html_page(
         "LOW": "🔵",
     }.get(severity.upper(), "⚠️")
 
-    summary = html.escape(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
-    deep_reasoning = html.escape(ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided.")
-    compliance = html.escape(ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark.")
+    summary = format_markdown_for_html(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
+    deep_reasoning = format_markdown_for_html(ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided.")
+    compliance = format_markdown_for_html(ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark.")
     fix_options = ai_analysis.get("fix_options") or []
     rec_opt = ai_analysis.get("recommended_option_number") or ai_analysis.get("best_option", {}).get("recommended_option_number", 1)
 
@@ -1412,14 +1801,14 @@ def render_deep_dive_html_page(
     for opt in fix_options:
         opt_num = opt.get("option_number", 1)
         opt_title = html.escape(opt.get("title", f"Option {opt_num}"))
-        opt_summary = html.escape(opt.get("summary") or opt.get("strategy") or "")
+        opt_summary = format_markdown_for_html(opt.get("summary") or opt.get("strategy") or "")
         pros = opt.get("pros") or []
         cons = opt.get("cons") or []
         is_rec = (opt_num == rec_opt)
         badge = '<span class="rec-badge">⭐ AI RECOMMENDED</span>' if is_rec else ''
 
-        pros_html = "".join([f"<li>+ {html.escape(p)}</li>" for p in pros]) if pros else "<li>+ Follows security best practices</li>"
-        cons_html = "".join([f"<li>- {html.escape(c)}</li>" for c in cons]) if cons else "<li>- Requires standard peer review</li>"
+        pros_html = "".join([f"<li>+ {format_markdown_for_html(p)}</li>" for p in pros]) if pros else "<li>+ Follows security best practices</li>"
+        cons_html = "".join([f"<li>- {format_markdown_for_html(c)}</li>" for c in cons]) if cons else "<li>- Requires standard peer review</li>"
 
         options_html += f"""
         <div class="option-card {'recommended' if is_rec else ''}">
@@ -1427,7 +1816,7 @@ def render_deep_dive_html_page(
                 <span class="option-title">Option {opt_num}: {opt_title}</span>
                 {badge}
             </div>
-            <p class="option-summary">{opt_summary}</p>
+            <div class="option-summary">{opt_summary}</div>
             <div class="pros-cons-grid">
                 <div class="pros-box">
                     <strong>Pros:</strong>
@@ -1575,11 +1964,21 @@ def render_deep_dive_html_page(
             align-items: center;
             gap: 8px;
         }}
-        .deep-section p {{
-            margin: 0;
+        .deep-section p, .deep-content p {{
+            margin: 0 0 10px 0;
             font-size: 14px;
             line-height: 1.6;
             color: var(--text-primary);
+        }}
+        .deep-content ul, .deep-content ol {{
+            margin: 8px 0 12px 0;
+            padding-left: 20px;
+            color: var(--text-primary);
+            font-size: 14px;
+            line-height: 1.6;
+        }}
+        .deep-content li {{
+            margin-bottom: 4px;
         }}
         .option-card {{
             background-color: #1f242c;
@@ -1729,12 +2128,12 @@ def render_deep_dive_html_page(
 
         <div class="deep-section">
             <h3>🧠 Architectural Rationale & Why This Fix Was Chosen</h3>
-            <p>{deep_reasoning}</p>
+            <div class="deep-content">{deep_reasoning}</div>
         </div>
 
         <div class="deep-section">
             <h3>🛡️ Compliance Scope & Workload Blast Radius Analysis</h3>
-            <p>{compliance}</p>
+            <div class="deep-content">{compliance}</div>
         </div>
 
         <h3 style="margin: 24px 0 14px 0; font-size: 18px; color: #ffffff;">🛠️ Declarative Terraform Fix Options</h3>
@@ -1749,6 +2148,440 @@ def render_deep_dive_html_page(
             </a>
         </div>
     </div>
+</body>
+</html>
+"""
+
+
+# -----------------------------------------------------------------------------
+# Deep Dive HTML Loading Page Renderer (Instant Browser Feedback with Solving Orb)
+# -----------------------------------------------------------------------------
+def render_deep_dive_loading_page(
+    finding_id: str,
+    issue_type: str,
+    resource_name: str,
+    severity: str = "HIGH"
+) -> str:
+    escaped_finding = html.escape(finding_id)
+    escaped_issue = html.escape(issue_type)
+    escaped_resource = html.escape(resource_name)
+    escaped_severity = html.escape(severity)
+
+    severity_icon = {
+        "CRITICAL": "🔴",
+        "HIGH": "🟠",
+        "MEDIUM": "🟡",
+        "LOW": "🔵",
+    }.get(severity.upper(), "⚠️")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analyzing {escaped_issue} | CloudGuard SecOps Deep Dive</title>
+    <style>
+        :root {{
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-blue: #38bdf8;
+            --accent-green: #10b981;
+            --accent-yellow: #d29922;
+            --accent-red: #f85149;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+        }}
+        .card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            max-width: 860px;
+            width: 100%;
+            padding: 32px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        }}
+        .badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 16px;
+        }}
+        .pulse-badge {{
+            background-color: rgba(56, 189, 248, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(56, 189, 248, 0.4);
+        }}
+        .error-badge {{
+            background-color: rgba(248, 81, 73, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(248, 81, 73, 0.4);
+        }}
+        h2 {{
+            margin: 0 0 8px 0;
+            font-size: 24px;
+            color: #ffffff;
+        }}
+        .subtitle {{
+            color: var(--text-secondary);
+            font-size: 15px;
+            margin-bottom: 24px;
+            line-height: 1.4;
+        }}
+        .info-card {{
+            background-color: #1f242c;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-bottom: 24px;
+        }}
+        .info-row {{
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            padding: 6px 0;
+            border-bottom: 1px solid #282e38;
+            font-size: 14px;
+        }}
+        .info-row:last-child {{ border-bottom: none; }}
+        .info-label {{
+            color: var(--text-secondary);
+            font-weight: 600;
+            min-width: 140px;
+            flex-shrink: 0;
+        }}
+        .info-value {{
+            color: var(--text-primary);
+            word-break: break-all;
+        }}
+        .info-value code {{
+            background-color: rgba(110, 118, 129, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+            font-size: 13px;
+            color: #79c0ff;
+        }}
+        .orb-wrapper {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            margin: 20px 0 28px 0;
+            padding: 12px 0;
+        }}
+        .orb-glow-backdrop {{
+            position: absolute;
+            width: 190px;
+            height: 190px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(56, 189, 248, 0.22) 0%, rgba(16, 185, 129, 0.15) 45%, rgba(13, 17, 23, 0) 70%);
+            filter: blur(22px);
+            pointer-events: none;
+            animation: orb-breathe 3.5s ease-in-out infinite alternate;
+        }}
+        @keyframes orb-breathe {{
+            0% {{ transform: scale(0.88); opacity: 0.55; }}
+            100% {{ transform: scale(1.18); opacity: 0.95; }}
+        }}
+        #solving-orb-canvas {{
+            width: 200px;
+            height: 200px;
+            z-index: 1;
+        }}
+        .orb-status-caption {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            background: rgba(22, 27, 34, 0.85);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            color: #38bdf8;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 1;
+        }}
+        .orb-status-dot {{
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: #10b981;
+            box-shadow: 0 0 8px #10b981;
+            animation: orb-dot-pulse 1.4s ease-in-out infinite;
+        }}
+        @keyframes orb-dot-pulse {{
+            0%, 100% {{ transform: scale(0.8); opacity: 0.5; }}
+            50% {{ transform: scale(1.3); opacity: 1; }}
+        }}
+        .status-indicator {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 10px;
+        }}
+        .error-box {{
+            background-color: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--accent-red);
+            border-radius: 6px;
+            padding: 16px;
+            color: #ff7b72;
+            font-size: 14px;
+            margin: 20px 0;
+            word-break: break-all;
+        }}
+        .retry-button {{
+            background-color: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            padding: 10px 18px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+        .retry-button:hover {{
+            background-color: #30363d;
+            color: #ffffff;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div id="loading-view">
+            <div class="badge pulse-badge">
+                <span class="orb-status-dot"></span>
+                <span>Security Architecture Analysis</span>
+            </div>
+            <h2>Analyzing: {severity_icon} {escaped_issue}</h2>
+            <div class="subtitle">CloudGuard SecOps AI Agent is retrieving comprehensive architectural reasoning, compliance mapping, and blast radius analysis...</div>
+
+            <div class="info-card">
+                <div class="info-row">
+                    <span class="info-label">Finding ID:</span>
+                    <span class="info-value"><code>{escaped_finding}</code></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Target Resource:</span>
+                    <span class="info-value"><code>{escaped_resource}</code></span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Severity:</span>
+                    <span class="info-value">{severity_icon} <strong>{escaped_severity}</strong></span>
+                </div>
+            </div>
+
+            <!-- SOLVING ORB -->
+            <div class="orb-wrapper">
+                <div class="orb-glow-backdrop"></div>
+                <canvas id="solving-orb-canvas" width="220" height="220"></canvas>
+                <div class="orb-status-caption">
+                    <span class="orb-status-dot"></span>
+                    <span id="orb-status-text">Retrieving Gemini Architecture Intelligence</span>
+                </div>
+            </div>
+
+            <div class="status-indicator">
+                <span id="loading-subtext">Fetching root cause analysis, compliance benchmarks, and remediation options...</span>
+                <span id="elapsed-time">Elapsed: 0s</span>
+            </div>
+        </div>
+
+        <div id="error-view" style="display: none;">
+            <div class="badge error-badge">
+                <span>⚠️</span>
+                <span>Analysis Retrieval Error</span>
+            </div>
+            <h2>Unable to Load Deep Dive Analysis</h2>
+            <div id="error-message" class="error-box"></div>
+            <button class="retry-button" onclick="location.reload()">Retry Analysis</button>
+        </div>
+    </div>
+
+    <script>
+        const startTime = Date.now();
+        const elapsedTimer = setInterval(() => {{
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const el = document.getElementById('elapsed-time');
+            if (el) el.innerText = 'Elapsed: ' + elapsed + 's';
+        }}, 1000);
+
+        function initSolvingOrb() {{
+            const canvas = document.getElementById('solving-orb-canvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const size = 220;
+            canvas.width = size * dpr;
+            canvas.height = size * dpr;
+            ctx.scale(dpr, dpr);
+
+            const cx = size / 2;
+            const cy = size / 2;
+
+            const orbits = [
+                {{ rx: 76, ry: 25, tilt: -0.45, speed: 0.022 }},
+                {{ rx: 80, ry: 28, tilt: 0.62, speed: -0.018 }},
+                {{ rx: 84, ry: 30, tilt: 1.25, speed: 0.016 }},
+                {{ rx: 72, ry: 23, tilt: -0.95, speed: -0.024 }}
+            ];
+
+            const palette = ['#38bdf8', '#10b981', '#6ee7b7', '#7dd3fc', '#a7f3d0'];
+
+            const particles = [];
+            const particleCount = 52;
+            for (let i = 0; i < particleCount; i++) {{
+                const orbIdx = i % orbits.length;
+                particles.push({{
+                    orbit: orbIdx,
+                    angle: (Math.PI * 2 / (particleCount / orbits.length)) * Math.floor(i / orbits.length) + (Math.random() * 0.4),
+                    speed: (0.014 + Math.random() * 0.01) * (i % 2 === 0 ? 1 : -1),
+                    radius: 1.7 + Math.random() * 1.5,
+                    color: palette[i % palette.length]
+                }});
+            }}
+
+            let animTime = 0;
+            let orbActive = true;
+
+            function renderOrb() {{
+                if (!orbActive) return;
+                ctx.clearRect(0, 0, size, size);
+                animTime += 0.03;
+
+                orbits.forEach((o, idx) => {{
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.rotate(o.tilt);
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, o.rx, o.ry, 0, 0, Math.PI * 2);
+                    ctx.strokeStyle = idx % 2 === 0 ? 'rgba(56, 189, 248, 0.16)' : 'rgba(16, 185, 129, 0.14)';
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                    ctx.restore();
+                }});
+
+                const backParticles = [];
+                const frontParticles = [];
+
+                particles.forEach(p => {{
+                    p.angle += p.speed;
+                    const o = orbits[p.orbit];
+                    const ex = Math.cos(p.angle) * o.rx;
+                    const ey = Math.sin(p.angle) * o.ry;
+                    const cosT = Math.cos(o.tilt);
+                    const sinT = Math.sin(o.tilt);
+                    const px = cx + (ex * cosT - ey * sinT);
+                    const py = cy + (ex * sinT + ey * cosT);
+                    const depth = Math.sin(p.angle);
+                    const item = {{ p, px, py, depth }};
+                    if (depth < 0) backParticles.push(item);
+                    else frontParticles.push(item);
+                }});
+
+                backParticles.forEach(item => {{
+                    const {{ p, px, py, depth }} = item;
+                    ctx.save();
+                    ctx.globalAlpha = 0.25 + 0.35 * (depth + 1);
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath();
+                    ctx.arc(px, py, p.radius * 0.8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }});
+
+                ctx.save();
+                const corePulse = Math.sin(animTime * 2.2) * 4;
+                const coreRadius = 24 + corePulse;
+
+                const outerGlow = ctx.createRadialGradient(cx, cy, 2, cx, cy, coreRadius * 1.8);
+                outerGlow.addColorStop(0, 'rgba(56, 189, 248, 0.8)');
+                outerGlow.addColorStop(0.4, 'rgba(16, 185, 129, 0.45)');
+                outerGlow.addColorStop(1, 'rgba(13, 17, 23, 0)');
+                ctx.fillStyle = outerGlow;
+                ctx.beginPath();
+                ctx.arc(cx, cy, coreRadius * 1.8, 0, Math.PI * 2);
+                ctx.fill();
+
+                const innerCore = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
+                innerCore.addColorStop(0, '#ffffff');
+                innerCore.addColorStop(0.3, '#7dd3fc');
+                innerCore.addColorStop(0.7, '#10b981');
+                innerCore.addColorStop(1, 'rgba(16, 185, 129, 0.1)');
+                ctx.fillStyle = innerCore;
+                ctx.shadowColor = '#38bdf8';
+                ctx.shadowBlur = 18;
+                ctx.beginPath();
+                ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                frontParticles.forEach(item => {{
+                    const {{ p, px, py, depth }} = item;
+                    ctx.save();
+                    ctx.globalAlpha = 0.65 + 0.35 * depth;
+                    ctx.fillStyle = p.color;
+                    ctx.shadowColor = p.color;
+                    ctx.shadowBlur = 10;
+                    ctx.beginPath();
+                    ctx.arc(px, py, p.radius * (1 + depth * 0.35), 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }});
+
+                requestAnimationFrame(renderOrb);
+            }}
+
+            requestAnimationFrame(renderOrb);
+            window._stopSolvingOrb = function() {{ orbActive = false; }};
+        }}
+
+        initSolvingOrb();
+
+        // Background fetch for the deep dive content
+        const targetUrl = new URL(window.location.href);
+        targetUrl.searchParams.set('content', 'true');
+
+        fetch(targetUrl.toString(), {{
+            headers: {{ 'Accept': 'text/html' }}
+        }})
+        .then(async (resp) => {{
+            clearInterval(elapsedTimer);
+            if (!resp.ok) throw new Error('Failed to retrieve analysis: HTTP ' + resp.status);
+            const htmlContent = await resp.text();
+            if (window._stopSolvingOrb) window._stopSolvingOrb();
+            document.open();
+            document.write(htmlContent);
+            document.close();
+        }})
+        .catch((err) => {{
+            clearInterval(elapsedTimer);
+            document.getElementById('loading-view').style.display = 'none';
+            document.getElementById('error-view').style.display = 'block';
+            document.getElementById('error-message').innerText = err.message || 'Error retrieving deep dive analysis.';
+        }});
+    </script>
 </body>
 </html>
 """
@@ -2170,6 +3003,62 @@ def render_loading_html_page(
             background-color: #30363d;
             color: #ffffff;
         }}
+        .orb-wrapper {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            margin: 12px 0 20px 0;
+            padding: 8px 0;
+        }}
+        .orb-glow-backdrop {{
+            position: absolute;
+            width: 190px;
+            height: 190px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(56, 189, 248, 0.22) 0%, rgba(16, 185, 129, 0.15) 45%, rgba(13, 17, 23, 0) 70%);
+            filter: blur(22px);
+            pointer-events: none;
+            animation: orb-breathe 3.5s ease-in-out infinite alternate;
+        }}
+        @keyframes orb-breathe {{
+            0% {{ transform: scale(0.88); opacity: 0.55; }}
+            100% {{ transform: scale(1.18); opacity: 0.95; }}
+        }}
+        #solving-orb-canvas {{
+            width: 200px;
+            height: 200px;
+            z-index: 1;
+        }}
+        .orb-status-caption {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 6px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            background: rgba(22, 27, 34, 0.85);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            color: #38bdf8;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 1;
+        }}
+        .orb-status-dot {{
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: #10b981;
+            box-shadow: 0 0 8px #10b981;
+            animation: orb-dot-pulse 1.4s ease-in-out infinite;
+        }}
+        @keyframes orb-dot-pulse {{
+            0%, 100% {{ transform: scale(0.8); opacity: 0.5; }}
+            50% {{ transform: scale(1.3); opacity: 1; }}
+        }}
     </style>
 </head>
 <body>
@@ -2195,6 +3084,16 @@ def render_loading_html_page(
                 <div class="info-row">
                     <span class="info-label">Selected Strategy:</span>
                     <span class="info-value"><strong>Option {option_number}: {escaped_title}</strong></span>
+                </div>
+            </div>
+
+            <!-- SOLVING ORB (Libraries.dev/orbs aesthetic) -->
+            <div class="orb-wrapper">
+                <div class="orb-glow-backdrop"></div>
+                <canvas id="solving-orb-canvas" width="220" height="220"></canvas>
+                <div class="orb-status-caption">
+                    <span class="orb-status-dot"></span>
+                    <span id="orb-status-text">Synthesizing Security Remediation</span>
                 </div>
             </div>
 
@@ -2401,6 +3300,144 @@ def render_loading_html_page(
             }}, 1000);
         }}
 
+        function initSolvingOrb() {{
+            const canvas = document.getElementById('solving-orb-canvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const size = 220;
+            canvas.width = size * dpr;
+            canvas.height = size * dpr;
+            ctx.scale(dpr, dpr);
+
+            const cx = size / 2;
+            const cy = size / 2;
+
+            // 4 tilted orbital ellipses (Electric Blue & Emerald Green)
+            const orbits = [
+                {{ rx: 76, ry: 25, tilt: -0.45, speed: 0.022 }},
+                {{ rx: 80, ry: 28, tilt: 0.62, speed: -0.018 }},
+                {{ rx: 84, ry: 30, tilt: 1.25, speed: 0.016 }},
+                {{ rx: 72, ry: 23, tilt: -0.95, speed: -0.024 }}
+            ];
+
+            const palette = ['#38bdf8', '#10b981', '#6ee7b7', '#7dd3fc', '#a7f3d0'];
+
+            const particles = [];
+            const particleCount = 52;
+            for (let i = 0; i < particleCount; i++) {{
+                const orbIdx = i % orbits.length;
+                particles.push({{
+                    orbit: orbIdx,
+                    angle: (Math.PI * 2 / (particleCount / orbits.length)) * Math.floor(i / orbits.length) + (Math.random() * 0.4),
+                    speed: (0.014 + Math.random() * 0.01) * (i % 2 === 0 ? 1 : -1),
+                    radius: 1.7 + Math.random() * 1.5,
+                    color: palette[i % palette.length]
+                }});
+            }}
+
+            let animTime = 0;
+            let orbActive = true;
+
+            function renderOrb() {{
+                if (!orbActive) return;
+                ctx.clearRect(0, 0, size, size);
+                animTime += 0.03;
+
+                // 1. Draw subtle orbital rings
+                orbits.forEach((o, idx) => {{
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.rotate(o.tilt);
+                    ctx.beginPath();
+                    ctx.ellipse(0, 0, o.rx, o.ry, 0, 0, Math.PI * 2);
+                    ctx.strokeStyle = idx % 2 === 0 ? 'rgba(56, 189, 248, 0.16)' : 'rgba(16, 185, 129, 0.14)';
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                    ctx.restore();
+                }});
+
+                const backParticles = [];
+                const frontParticles = [];
+
+                particles.forEach(p => {{
+                    p.angle += p.speed;
+                    const o = orbits[p.orbit];
+                    const ex = Math.cos(p.angle) * o.rx;
+                    const ey = Math.sin(p.angle) * o.ry;
+                    const cosT = Math.cos(o.tilt);
+                    const sinT = Math.sin(o.tilt);
+                    const px = cx + (ex * cosT - ey * sinT);
+                    const py = cy + (ex * sinT + ey * cosT);
+                    const depth = Math.sin(p.angle);
+                    const item = {{ p, px, py, depth }};
+                    if (depth < 0) {{
+                        backParticles.push(item);
+                    }} else {{
+                        frontParticles.push(item);
+                    }}
+                }});
+
+                // 2. Render particles behind core
+                backParticles.forEach(item => {{
+                    const {{ p, px, py, depth }} = item;
+                    ctx.save();
+                    ctx.globalAlpha = 0.25 + 0.35 * (depth + 1);
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath();
+                    ctx.arc(px, py, p.radius * 0.8, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }});
+
+                // 3. Central Pulsing Solving Core
+                ctx.save();
+                const corePulse = Math.sin(animTime * 2.2) * 4;
+                const coreRadius = 24 + corePulse;
+
+                const outerGlow = ctx.createRadialGradient(cx, cy, 2, cx, cy, coreRadius * 1.8);
+                outerGlow.addColorStop(0, 'rgba(56, 189, 248, 0.8)');
+                outerGlow.addColorStop(0.4, 'rgba(16, 185, 129, 0.45)');
+                outerGlow.addColorStop(1, 'rgba(13, 17, 23, 0)');
+                ctx.fillStyle = outerGlow;
+                ctx.beginPath();
+                ctx.arc(cx, cy, coreRadius * 1.8, 0, Math.PI * 2);
+                ctx.fill();
+
+                const innerCore = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
+                innerCore.addColorStop(0, '#ffffff');
+                innerCore.addColorStop(0.3, '#7dd3fc');
+                innerCore.addColorStop(0.7, '#10b981');
+                innerCore.addColorStop(1, 'rgba(16, 185, 129, 0.1)');
+                ctx.fillStyle = innerCore;
+                ctx.shadowColor = '#38bdf8';
+                ctx.shadowBlur = 18;
+                ctx.beginPath();
+                ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+
+                // 4. Render particles in front of core
+                frontParticles.forEach(item => {{
+                    const {{ p, px, py, depth }} = item;
+                    ctx.save();
+                    ctx.globalAlpha = 0.65 + 0.35 * depth;
+                    ctx.fillStyle = p.color;
+                    ctx.shadowColor = p.color;
+                    ctx.shadowBlur = 10;
+                    ctx.beginPath();
+                    ctx.arc(px, py, p.radius * (1 + depth * 0.35), 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                }});
+
+                requestAnimationFrame(renderOrb);
+            }}
+
+            requestAnimationFrame(renderOrb);
+            window._stopSolvingOrb = function() {{ orbActive = false; }};
+        }}
+
         function copyCode() {{
             const codeEl = document.getElementById('completed-code-pre');
             if (codeEl) {{
@@ -2420,36 +3457,90 @@ def render_loading_html_page(
             document.getElementById('completed-view').style.display = 'none';
             
             startTime = Date.now();
+            initSolvingOrb();
             startProgressAnimation();
 
-            const executeUrl = new URL(window.location.href);
-            executeUrl.searchParams.set('action', 'execute');
+            const streamUrl = new URL(window.location.href);
+            streamUrl.searchParams.set('action', 'execute');
+            streamUrl.searchParams.set('stream', 'true');
 
-            fetch(executeUrl.toString(), {{
-                method: 'GET',
-                headers: {{
-                    'Accept': 'application/json'
+            let eventSource = null;
+            let streamSupported = (typeof window.EventSource !== 'undefined');
+
+            function fallbackFetch() {{
+                const executeUrl = new URL(window.location.href);
+                executeUrl.searchParams.set('action', 'execute');
+
+                fetch(executeUrl.toString(), {{
+                    method: 'GET',
+                    headers: {{
+                        'Accept': 'application/json'
+                    }}
+                }})
+                .then(async (resp) => {{
+                    clearInterval(progressTimer);
+                    clearInterval(elapsedTimer);
+                    const data = await resp.json();
+                    if (!resp.ok || (data.status !== 'success' && data.status !== 'already_remediated')) {{
+                        throw new Error(data.error || data.message || ('Server error: HTTP ' + resp.status));
+                    }}
+                    onRemediationComplete(data);
+                }})
+                .catch((err) => {{
+                    clearInterval(progressTimer);
+                    clearInterval(elapsedTimer);
+                    document.getElementById('loading-view').style.display = 'none';
+                    document.getElementById('error-view').style.display = 'block';
+                    document.getElementById('error-message').innerText = err.message || 'Failed to complete remediation.';
+                }});
+            }}
+
+            if (streamSupported) {{
+                try {{
+                    eventSource = new EventSource(streamUrl.toString());
+                    eventSource.onmessage = function(e) {{
+                        try {{
+                            const evt = JSON.parse(e.data);
+                            if (evt.event === 'progress') {{
+                                if (evt.pct) setProgress(evt.pct, evt.status_text);
+                                if (evt.step_num) {{
+                                    for (let s = 1; s < evt.step_num; s++) {{
+                                        setStep(s, 'completed');
+                                    }}
+                                    setStep(evt.step_num, 'active', evt.step_text);
+                                }}
+                                if (evt.orb_status) {{
+                                    const orbTxt = document.getElementById('orb-status-text');
+                                    if (orbTxt) orbTxt.innerText = evt.orb_status;
+                                }}
+                            }} else if (evt.event === 'complete') {{
+                                eventSource.close();
+                                clearInterval(progressTimer);
+                                clearInterval(elapsedTimer);
+                                onRemediationComplete(evt.data);
+                            }} else if (evt.event === 'error') {{
+                                eventSource.close();
+                                throw new Error(evt.error || 'Remediation failed');
+                            }}
+                        }} catch (err) {{
+                            eventSource.close();
+                            fallbackFetch();
+                        }}
+                    }};
+                    eventSource.onerror = function() {{
+                        eventSource.close();
+                        fallbackFetch();
+                    }};
+                }} catch (se) {{
+                    fallbackFetch();
                 }}
-            }})
-            .then(async (resp) => {{
-                clearInterval(progressTimer);
-                clearInterval(elapsedTimer);
-                const data = await resp.json();
-                if (!resp.ok || (data.status !== 'success' && data.status !== 'already_remediated')) {{
-                    throw new Error(data.error || data.message || ('Server error: HTTP ' + resp.status));
-                }}
-                onRemediationComplete(data);
-            }})
-            .catch((err) => {{
-                clearInterval(progressTimer);
-                clearInterval(elapsedTimer);
-                document.getElementById('loading-view').style.display = 'none';
-                document.getElementById('error-view').style.display = 'block';
-                document.getElementById('error-message').innerText = err.message || 'Failed to complete remediation.';
-            }});
+            }} else {{
+                fallbackFetch();
+            }}
         }}
 
         function onRemediationComplete(data) {{
+            if (window._stopSolvingOrb) window._stopSolvingOrb();
             setProgress(100, 'Remediation completed successfully!');
             setStep(2, 'completed', 'Terraform HCL generated and validated.');
             setStep(3, 'completed', 'Code committed to dedicated branch.');
@@ -2771,7 +3862,12 @@ def render_secops_dashboard_html() -> str:
             <td><span class="resource-pill" title="{html.escape(res)}">{html.escape(clean_res)}</span></td>
             <td><span class="time-pill">{html.escape(proc_time[:19])}</span></td>
             <td><span class="status-pill {status_class}">{html.escape(status_label)}</span></td>
-            <td class="actions-cell">{pr_action_html} {audit_btn_html}</td>
+            <td class="actions-cell">
+                <div class="actions-grid">
+                    <div class="action-slot pr-slot">{pr_action_html}</div>
+                    <div class="action-slot audit-slot">{audit_btn_html}</div>
+                </div>
+            </td>
         </tr>
         """
         table_rows.append(row_html)
@@ -3045,13 +4141,29 @@ def render_secops_dashboard_html() -> str:
         .badge-dismissed {{ background-color: rgba(110, 118, 129, 0.2); color: #8b949e; border: 1px solid rgba(110, 118, 129, 0.4); }}
 
         .actions-cell {{
+            padding: 10px 16px;
+        }}
+        .actions-grid {{
+            display: grid;
+            grid-template-columns: 140px 120px;
+            gap: 8px;
+            align-items: center;
+        }}
+        .action-slot {{
             display: flex;
             align-items: center;
-            gap: 8px;
+            height: 32px;
+        }}
+        .action-slot.pr-slot {{
+            min-width: 140px;
+        }}
+        .action-slot.audit-slot {{
+            min-width: 120px;
         }}
         .action-btn {{
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
             padding: 6px 12px;
             border-radius: 6px;
@@ -3061,22 +4173,36 @@ def render_secops_dashboard_html() -> str:
             cursor: pointer;
             border: none;
             transition: background-color 0.15s ease;
+            white-space: nowrap;
+            height: 32px;
+            box-sizing: border-box;
         }}
-        .pr-btn {{
+        .actions-grid .pr-btn {{
             background-color: #238636;
             color: #ffffff;
+            width: 140px;
         }}
-        .pr-btn:hover {{
+        .actions-grid .pr-btn:hover {{
             background-color: #2ea043;
         }}
-        .audit-btn {{
+        .actions-grid .audit-btn {{
             background-color: #21262d;
             border: 1px solid var(--border-color);
             color: var(--text-primary);
+            width: 120px;
         }}
-        .audit-btn:hover {{
+        .actions-grid .audit-btn:hover {{
             background-color: #30363d;
             border-color: #8b949e;
+        }}
+        #audit-stage4-link {{
+            background-color: #238636;
+            color: #ffffff;
+            width: auto;
+            padding: 8px 16px;
+        }}
+        #audit-stage4-link:hover {{
+            background-color: #2ea043;
         }}
 
         /* Slide-Out Audit Drawer */
@@ -3323,7 +4449,7 @@ def render_secops_dashboard_html() -> str:
                         <th>Target Cloud Resource</th>
                         <th style="width: 180px;">Detection Time</th>
                         <th style="width: 150px;">Status</th>
-                        <th style="width: 240px;">Actions</th>
+                        <th style="width: 280px;">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="findings-table-body">
@@ -3465,7 +4591,8 @@ def render_secops_dashboard_html() -> str:
             const prLinkElem = document.getElementById('audit-stage4-link');
             if (prUrl) {{
                 prLinkElem.href = prUrl;
-                prLinkElem.innerText = 'View Pull Request #' + (prNum || '') + ' on GitHub &rarr;';
+                const prText = prNum ? ('View Pull Request #' + prNum + ' on GitHub →') : 'View Pull Request on GitHub →';
+                prLinkElem.textContent = prText;
                 prLinkElem.style.display = 'inline-flex';
             }} else {{
                 prLinkElem.style.display = 'none';
@@ -3640,21 +4767,26 @@ def _handle_chat_webhook_impl(request):
         finding_severity = alert_data.get("severity", "HIGH")
         finding_project = alert_data.get("project_id") or PROJECT_ID
 
-        deep_dive_card = build_deep_dive_chat_card(
-            finding_id=finding_key,
-            issue_type=issue_type,
-            severity=finding_severity,
-            resource_name=resource_name,
-            project_id=finding_project,
-            ai_analysis=ai_analysis,
-            receiver_url=receiver_url
-        )
-        chat_delivered = notify_google_chat(card_payload=deep_dive_card, thread_name=thread_name)
+        content_requested = (request.args.get("content") or "").lower() in ["true", "1", "yes"]
+
+        # Fast loading screen (<50ms) with Solving Orb for direct browser navigation
+        if wants_html and not content_requested:
+            return (
+                render_deep_dive_loading_page(
+                    finding_id=finding_key,
+                    issue_type=issue_type,
+                    resource_name=resource_name,
+                    severity=finding_severity
+                ),
+                200,
+                {"Content-Type": "text/html; charset=utf-8"}
+            )
+
+        # Record viewing in Firestore without duplicate Google Chat notification
         try:
             doc_ref.set({
                 "lifecycle_events": {
-                    "details_viewed_at": firestore.SERVER_TIMESTAMP,
-                    "details_chat_delivered": bool(chat_delivered)
+                    "details_viewed_at": firestore.SERVER_TIMESTAMP
                 }
             }, merge=True)
         except Exception as e:
@@ -3670,16 +4802,15 @@ def _handle_chat_webhook_impl(request):
                     project_id=finding_project,
                     ai_analysis=ai_analysis,
                     receiver_url=receiver_url,
-                    chat_dispatched=bool(chat_delivered)
+                    chat_dispatched=False
                 ),
                 200,
                 {"Content-Type": "text/html; charset=utf-8"}
             )
         return (
             safe_json_dumps({
-                "status": "details_dispatched",
+                "status": "details_rendered",
                 "finding_id": finding_key,
-                "chat_notified": chat_delivered,
                 "ai_analysis": ai_analysis
             }),
             200,
@@ -3868,6 +4999,102 @@ def _handle_chat_webhook_impl(request):
                 200,
                 {"Content-Type": "text/html; charset=utf-8"}
             )
+
+        is_stream = (request.args.get("stream") or "").lower() == "true"
+        if is_stream and Response:
+            event_q = queue.Queue()
+
+            def progress_callback(step_num: int, pct: int, status_text: str, step_text: str, orb_status: str):
+                event_q.put({
+                    "event": "progress",
+                    "step_num": step_num,
+                    "pct": pct,
+                    "status_text": status_text,
+                    "step_text": step_text,
+                    "orb_status": orb_status
+                })
+
+            def worker():
+                try:
+                    logger.info(f"Worker thread running ADK agent for {finding_key}...")
+                    res = run_scc_remediation_agent(
+                        alert_doc_ref=doc_ref,
+                        alert_data=alert_data,
+                        finding_id=finding_key,
+                        issue_type=issue_type,
+                        resource_name=resource_name,
+                        selected_option=selected_option,
+                        target_num=target_num,
+                        user_text=user_text,
+                        project_id=PROJECT_ID,
+                        location=VERTEX_LOCATION,
+                        model_name=VERTEX_MODEL,
+                        github_repo=GITHUB_REPO,
+                        github_token=GITHUB_TOKEN,
+                        github_base_branch=GITHUB_BASE_BRANCH,
+                        chat_webhook_url=GOOGLE_CHAT_WEBHOOK_URL,
+                        progress_callback=progress_callback
+                    )
+                    pr_r = res.get("pr_result") or {}
+                    event_q.put({
+                        "event": "complete",
+                        "data": {
+                            "status": "success",
+                            "action": "GITHUB_PR_OPENED" if pr_r.get("success") else "TERRAFORM_CODE_GENERATED",
+                            "finding_id": finding_key,
+                            "selected_option": target_num,
+                            "github_pr": pr_r if pr_r.get("success") else None,
+                            "pr_url": pr_r.get("pr_url"),
+                            "pr_number": pr_r.get("pr_number"),
+                            "branch_name": pr_r.get("branch_name"),
+                            "file_path": pr_r.get("file_path"),
+                            "applied_to_infrastructure": False,
+                            "terraform_code": res.get("terraform_code", ""),
+                            "explanation": res.get("explanation", "")
+                        }
+                    })
+                except Exception as ex:
+                    logger.error(f"Worker thread exception during remediation: {ex}\n{traceback.format_exc()}")
+                    event_q.put({
+                        "event": "error",
+                        "error": str(ex)
+                    })
+                finally:
+                    event_q.put(None)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            def sse_event_stream():
+                initial_evt = {
+                    "event": "progress",
+                    "step_num": 2,
+                    "pct": 20,
+                    "status_text": "Invoking Google ADK Remediation Agent (Gemini 2.5)...",
+                    "step_text": "Synthesizing declarative Terraform HCL with zero-trust validation...",
+                    "orb_status": "Analyzing Security Policy"
+                }
+                yield f"data: {json.dumps(initial_evt)}\n\n"
+
+                while True:
+                    try:
+                        item = event_q.get(timeout=25)
+                        if item is None:
+                            break
+                        yield f"data: {json.dumps(item)}\n\n"
+                        if item.get("event") in ("complete", "error"):
+                            break
+                    except queue.Empty:
+                        yield ": keep-alive\n\n"
+
+            headers = {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no"
+            }
+            if stream_with_context:
+                return Response(stream_with_context(sse_event_stream()), headers=headers)
+            else:
+                return Response(sse_event_stream(), headers=headers)
 
         logger.info(
             f"Invoking Autonomous Google ADK Remediation Agent for finding '{finding_key}' "
