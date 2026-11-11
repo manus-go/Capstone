@@ -32,6 +32,9 @@
 
 ## 4. Cloud Functions Gen 2 & Cloud Run Invariants
 - **CPU & Memory Ratios**: When configuring Cloud Functions Gen 2 / Cloud Run containers with `available_memory = "1024M"` or higher, ALWAYS set `available_cpu = "1"` in Terraform `service_config`. Omitting CPU triggers Cloud Run deployment validation errors.
+- **Live Service Deployment Synchronisation**: When implementing or updating web applications, webhook receivers, or dashboards hosted on Cloud Run / Cloud Functions Gen 2, NEVER direct an operator to verify a live HTTPS URL based solely on local workspace modifications. The agent MUST either:
+  1. Package and deploy the update to GCP (e.g. via `terraform apply -target=google_cloudfunctions2_function.<name> -target=google_storage_bucket_object.<zip>` or `gcloud run deploy`), verifying deployment completion and probing live HTTP response status/payloads prior to notification; OR
+  2. Clearly communicate that changes exist only locally, and provide or run a local development preview server (`http://localhost:...`) for verification.
 
 ## 5. Technical Documentation & Google Docs Invariants
 - **Non-Destructive Section Updates**: When updating existing Google Docs or architecture specifications, never use full-document wipes (`mutate write` or full `mutate sync`) if the document contains embedded diagrams, images, or drawings. Always map character index boundaries (`readonly structure --json`) and perform targeted in-place section updates.
@@ -52,6 +55,7 @@
   1. 💡 *Architectural Reasoning & Trade-Offs*
   2. 🛡️ *Compliance & Workload Blast Radius Analysis*
   3. 📦 *Staged Terraform HCL Preview* (badged `Safely Staged • NOT Applied`)
+- **Reversible Presentation Layer Architecture**: When testing significant UI restyling or experimental interfaces, decouple the UI into dedicated presentation modules and keep core handler logic, state machines, and API contracts pristine. Implement dual-mode reversibility (e.g. query parameter `?ui=classic`, session cookies, or an environment flag `USE_AVIONICS_UI`) and maintain a zero-friction single-command rollback path (`git checkout <entrypoint> && rm <presentation_module>`) to ensure instantaneous, regression-free reversion to the baseline UI upon request.
 
 ## 7. Autonomous ADK Multi-Tool GitOps Execution Order
 - **Sequential Tool Chain**: Autonomous ADK remediation agents must enforce a strict 6-step operational pipeline:
@@ -90,3 +94,6 @@
   4. *Autonomous ADK GitOps Execution & PR Creation*
 - **DOM Entity Hygiene**: Dynamic JavaScript DOM updates must never inject raw HTML character entities (such as `&rarr;`) through `.innerText` or `.textContent`. Always use literal unicode glyphs (`→`) or assign via `.innerHTML`.
 - **Fixed-Grid Actions Column Alignment**: Table actions containing conditional elements (e.g., `Review PR` and `📋 Audit Trail`) must enforce a fixed-column layout (such as a 2-column CSS Grid `140px 120px` with fixed slot widths). Even when findings do not have an open PR, slot 1 must maintain its width so that all `📋 Audit Trail` buttons in slot 2 remain strictly vertically aligned across all table rows.
+
+## 10. Workspace Customization & Git Synchronization
+- **Custom Skill & Rule Persistence**: All workspace customizations (skills in `.agents/skills/<name>/SKILL.md` and rules in `AGENTS.md` / `.agents/rules/`) are canonical project assets. When adding, refining, or archiving workspace skills, ensure they are committed and pushed to the upstream Git repository so they persist across agent sessions and team workstations.
