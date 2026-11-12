@@ -145,7 +145,7 @@ def parse_resource_display(resource_name: str, project_id: str = "") -> Dict[str
 
 def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_name: str) -> dict:
     """
-    Invokes the Google Agent Development Kit (ADK) autonomous Triage Agent equipped with
+    Invokes the autonomous Gemini Triage Agent equipped with
     the `publish_triage_assessment` tool to:
     1. Write a 1-sentence technical issue and breach risk summary.
     2. Formulate declarative Terraform remediation options with concise summaries, pros, and cons.
@@ -177,7 +177,7 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
     source_properties = finding.get("sourceProperties", {})
     next_steps = finding.get("nextSteps", "")
 
-    # Configure Vertex AI backend for ADK
+    # Configure Google Cloud IAM backend for the Gemini Triage Agent
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
     os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
     os.environ["GOOGLE_CLOUD_LOCATION"] = location
@@ -186,9 +186,11 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
 
     def normalize_str_list(val: Any) -> List[str]:
         if isinstance(val, list):
-            return [str(x).strip("-* \t\n") for x in val if str(x).strip()]
+            cleaned = [re.sub(r"^[\s\+\-\*•]+", "", str(x)).strip() for x in val]
+            return [x for x in cleaned if x]
         if isinstance(val, str):
-            return [line.strip("-* \t\n") for line in val.split("\n") if line.strip()]
+            cleaned = [re.sub(r"^[\s\+\-\*•]+", "", line).strip() for line in val.split("\n")]
+            return [x for x in cleaned if x]
         return []
 
     def publish_triage_assessment(
@@ -208,18 +210,18 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
         """Publishes the structured triage assessment and Terraform remediation options for the security finding.
 
         Args:
-            one_sentence_summary: Exactly one concise, punchy sentence summarizing the vulnerability, affected resource, and breach/exploit risk. No filler words.
+            one_sentence_summary: Maximum 22 words. State the exact misconfiguration, exposed principal or attack vector, and concrete breach impact in one punchy sentence.
             recommended_option_number: Integer 1 or 2 identifying which option is objectively recommended.
-            option_1_title: Short descriptive title for Option 1 (e.g. Enforce Uniform Bucket-Level Access).
-            option_1_summary: Exactly one clear sentence explaining what Terraform changes this option applies.
-            option_1_pros: 2 to 3 concise bullet points highlighting key security and operational benefits.
-            option_1_cons: 1 to 2 concise bullet points highlighting limitations, operational trade-offs, or migration impact.
-            option_2_title: Short descriptive title for Option 2 (e.g. Enforce Private IP & IAM Restriction).
-            option_2_summary: Exactly one clear sentence explaining what alternative Terraform changes this option applies.
-            option_2_pros: 2 to 3 concise bullet points highlighting benefits.
-            option_2_cons: 1 to 2 concise bullet points highlighting trade-offs.
-            deep_architectural_reasoning: In-depth technical rationale and architecture justification explaining why the recommended option was chosen.
-            compliance_and_blast_radius: Analysis of CIS/NIST compliance alignment, production blast radius, and workload dependencies.
+            option_1_title: Short descriptive title for Option 1 (3 to 6 words, e.g. Enforce Uniform Bucket-Level Access).
+            option_1_summary: Maximum 18 words explaining the exact declarative Terraform change Option 1 applies.
+            option_1_pros: 2 to 3 impact-ordered phrases (put the single strongest security benefit first, max 10 words each, with NO leading +, -, *, or bullet symbols).
+            option_1_cons: 1 to 2 impact-ordered phrases (put the primary operational trade-off first, max 10 words each, with NO leading +, -, *, or bullet symbols).
+            option_2_title: Short descriptive title for Option 2 (3 to 6 words, e.g. Enforce Public Access Prevention Only).
+            option_2_summary: Maximum 18 words explaining the alternative declarative Terraform change Option 2 applies.
+            option_2_pros: 2 to 3 impact-ordered phrases (put the single strongest benefit first, max 10 words each, with NO leading +, -, *, or bullet symbols).
+            option_2_cons: 1 to 2 impact-ordered phrases (put the primary operational trade-off first, max 10 words each, with NO leading +, -, *, or bullet symbols).
+            deep_architectural_reasoning: 2 to 3 structured markdown bullet points (- **Heading:** ...) explaining why the recommended option eliminates the root class of vulnerability over the alternative.
+            compliance_and_blast_radius: 2 to 3 structured markdown bullet points (- **Heading:** ...) covering CIS GCP Benchmark / NIST 800-53 controls and concrete production dependencies to verify before merging.
         """
         opt1_p = normalize_str_list(option_1_pros)
         opt1_c = normalize_str_list(option_1_cons)
@@ -270,20 +272,20 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
         return {"status": "published", "title": best_title, "recommended_option": rec_num}
 
     agent_instruction = (
-        "You are an elite Principal Cloud Security Architect specializing in Infrastructure as Code (Terraform) on Google Cloud Platform.\n"
-        "Your role is to analyze Google Cloud Security Command Center (SCC) findings and formulate "
+        "You are an elite Principal Cloud Security Architect specialising in Infrastructure as Code (Terraform) on Google Cloud Platform.\n"
+        "Your role is to analyse Google Cloud Security Command Center (SCC) findings and formulate "
         "declarative Infrastructure-as-Code (Terraform) remediation strategies for platform and security engineering teams.\n\n"
         "STRICT MANDATORY RULES:\n"
-        "1. ALL remediation strategies and fix options MUST represent Infrastructure-as-Code (Terraform) configuration changes "
-        "(e.g., enabling uniform bucket-level access, enforcing restrictive IAM policy bindings, configuring private Google access or firewall rules, enabling encryption).\n"
+        "1. ALL remediation strategies and fix options MUST represent declarative Terraform configuration changes "
+        "(e.g. enabling uniform bucket-level access, enforcing restrictive IAM policy bindings, configuring private Google access or firewall rules, enabling encryption).\n"
         "2. NEVER mention or suggest manual Google Cloud Console clicks, GUI instructions, or imperative CLI commands "
         "(such as `gcloud`, `gsutil`, `bq`, `kubectl`, or shell scripts).\n"
-        "3. High-density, concise communication: The initial alert summary must be exactly ONE punchy sentence. Keep option summaries to single sentences and pros/cons to brief bullets.\n"
-        "4. Place comprehensive technical rationale, workload blast radius, and CIS/NIST compliance impacts into deep_architectural_reasoning and compliance_and_blast_radius for on-demand inspection.\n"
-        "5. Do NOT include code snippets, backtick code fences, or raw Terraform HCL syntax in summaries or titles.\n"
-        "6. Explicitly designate which option (1 or 2) is recommended.\n"
-        "7. You MUST call the `publish_triage_assessment` tool to deliver your structured findings.\n"
-        "8. No fallbacks: perform precise and authoritative analysis."
+        "3. High-density, scannable brevity: `one_sentence_summary` MUST be 22 words or fewer. `option_1_summary` and `option_2_summary` MUST be 18 words or fewer.\n"
+        "4. Impact-ordered, prefix-free Pros & Cons: Order `pros` and `cons` with the single highest-impact point FIRST (max 10 words per item). Write plain phrases ONLY: NEVER prefix items with `+`, `-`, `*`, bullets, or numbering.\n"
+        "5. Format `deep_architectural_reasoning` and `compliance_and_blast_radius` as 2 to 3 crisp markdown bullet points (`- **Label:** explanation`) rather than dense walls of prose.\n"
+        "6. Do NOT include code fences or raw Terraform HCL blocks in summaries, titles, pros, or cons.\n"
+        "7. Explicitly designate which option (1 or 2) is objectively recommended and call `publish_triage_assessment`.\n"
+        "8. Perform precise, zero-fallback security engineering analysis."
     )
 
     triage_agent = Agent(
@@ -302,7 +304,7 @@ def run_scc_triage_agent(payload: dict, project_id: str, location: str, model_na
     )
 
     user_prompt = f"""
-Analyze the following Google Cloud Security Command Center (SCC) finding:
+Analyse the following Google Cloud Security Command Center (SCC) finding:
 
 [Finding Details]
 - Category/Type: {issue_type}
@@ -318,7 +320,7 @@ Execute the publish_triage_assessment tool with your analysis.
     session_id = f"triage_{sanitize_doc_id(resource_name)}_{int(time.time()*1000)}"
     content = types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])
 
-    logger.info(f"Running ADK Triage Agent for finding: {issue_type} on {resource_name}")
+    logger.info(f"Running Gemini Triage Agent for finding: {issue_type} on {resource_name}")
     raw_output_parts = []
     for event in runner.run(user_id="scc_pipeline", session_id=session_id, new_message=content):
         if event.message and event.message.parts:
@@ -329,12 +331,12 @@ Execute the publish_triage_assessment tool with your analysis.
     raw_response_text = "\n".join(raw_output_parts)
     if not triage_result:
         raise RuntimeError(
-            f"ADK Triage Agent completed without publishing triage assessment for {issue_type} on {resource_name}. "
+            f"Gemini Triage Agent completed without publishing triage assessment for {issue_type} on {resource_name}. "
             f"Raw output: {raw_response_text[:300]}"
         )
 
     triage_result["raw_output"] = raw_response_text
-    logger.info(f"ADK Triage Agent completed successfully. Recommended: {triage_result.get('best_option', {}).get('recommended_title')}")
+    logger.info(f"Gemini Triage Agent completed successfully. Recommended: {triage_result.get('best_option', {}).get('recommended_title')}")
     return triage_result
 
 
@@ -490,16 +492,15 @@ def build_google_chat_payload(
         fallback_lines.append(f"• [↗️ Open SCC Console]({scc_console_url})")
     fallback_markdown_text = "\n".join(fallback_lines)
 
-    # Google Chat Card V2
+    # Google Chat Card V2 (Minimalist Key-Value Layout matching PR Staged Card)
     card_sections = []
 
-    # Section 1: Executive Overview
+    # Section 1: Security Issue Overview (Key-Value)
     card_sections.append({
-        "header": "⚡ Security Issue Overview",
         "widgets": [
             {
                 "decoratedText": {
-                    "topLabel": f"AFFECTED {asset_type.upper()}",
+                    "topLabel": f"TARGET {asset_type.upper()}",
                     "text": f"<b>{clean_res}</b>",
                     "bottomLabel": f"Project: {display_proj} &nbsp;|&nbsp; Severity: {severity}",
                     "wrapText": True
@@ -507,33 +508,42 @@ def build_google_chat_payload(
             },
             {
                 "textParagraph": {
-                    "text": f"<b>Risk:</b> {summary}"
+                    "text": (
+                        f"<b>Category:</b> <code>{issue_type}</code><br>"
+                        f"<b>Issue &amp; Risk:</b> {summary}"
+                    )
                 }
             }
         ]
     })
 
-    # Section 2: Remediation Options
+    # Section 2: Condensed Colour-Coded Remediation Options
     option_widgets = []
     for opt in fix_options:
         opt_num = opt.get("option_number", 1)
-        opt_title = opt.get("title", f"Option {opt_num}")
+        opt_title = format_chat_card_html(opt.get("title", f"Option {opt_num}"))
         opt_summary = format_chat_card_html(opt.get("summary") or opt.get("strategy") or "")
         pros = opt.get("pros") or []
         cons = opt.get("cons") or []
 
         is_recommended = (opt_num == rec_opt_num)
-        rec_badge = " ⭐ <b>[AI RECOMMENDED]</b>" if is_recommended else ""
+        rec_badge = " &nbsp;⭐ <b>Recommended</b>" if is_recommended else ""
 
         lines = [f"<b>Option {opt_num}: {opt_title}</b>{rec_badge}"]
         if opt_summary:
             lines.append(f"<i>{opt_summary}</i>")
+
+        highlight_parts = []
         if pros:
-            pros_str = " • " + " • ".join(pros)
-            lines.append(f"<font color=\"#2da44e\"><b>Pros:</b></font> {pros_str}")
+            top_pro = format_chat_card_html(re.sub(r"^[\s\+\-\*•]+", "", str(pros[0])).strip())
+            if top_pro:
+                highlight_parts.append(f"<font color=\"#2da44e\"><b>Pro:</b></font> {top_pro}")
         if cons:
-            cons_str = " • " + " • ".join(cons)
-            lines.append(f"<font color=\"#cf222e\"><b>Cons:</b></font> {cons_str}")
+            top_con = format_chat_card_html(re.sub(r"^[\s\+\-\*•]+", "", str(cons[0])).strip())
+            if top_con:
+                highlight_parts.append(f"<font color=\"#cf222e\"><b>Con:</b></font> {top_con}")
+        if highlight_parts:
+            lines.append(" &nbsp;•&nbsp; ".join(highlight_parts))
 
         option_widgets.append({
             "textParagraph": {
@@ -541,18 +551,22 @@ def build_google_chat_payload(
             }
         })
 
-    card_sections.append({
-        "header": "🛠️ Terraform Fix Options",
-        "widgets": option_widgets
-    })
+    if option_widgets:
+        card_sections.append({
+            "widgets": option_widgets
+        })
 
-    # Section 3: One-Click Actions
+    # Section 3: One-Click Actions & Safety Policy Footer
     card_sections.append({
-        "header": "⚡ Take Action",
         "widgets": [
             {
                 "buttonList": {
                     "buttons": action_buttons
+                }
+            },
+            {
+                "textParagraph": {
+                    "text": "<font color=\"#8b949e\">🔒 <b>Safety Policy:</b> Fixes stage a GitHub PR on a dedicated branch for human review. <b>NOT applied</b> to live infrastructure.</font>"
                 }
             }
         ]
@@ -564,10 +578,8 @@ def build_google_chat_payload(
                 "cardId": f"scc_alert_{sanitize_doc_id(issue_type)}_{finding_id}",
                 "card": {
                     "header": {
-                        "title": f"{severity_icon} {issue_type}",
-                        "subtitle": f"{clean_res} ({asset_type}) • {display_proj}",
-                        "imageUrl": "https://www.gstatic.com/images/branding/product/2x/security_48dp.png",
-                        "imageType": "CIRCLE"
+                        "title": f"{severity_icon} Security Alert: {issue_type}",
+                        "subtitle": f"{clean_res} • {display_proj}"
                     },
                     "sections": card_sections
                 }
@@ -648,7 +660,7 @@ def process_scc_alert(cloud_event):
     3. Checks user preferences in Firestore ('issue_preferences').
        - If status == 'IGNORED', suppresses alert, skips AI and chat notification.
        - If status == 'NOTIFIED' (or newly auto-registered):
-         a) Invokes Vertex AI (Gemini) to generate:
+         a) Invokes the Gemini Triage Agent to generate:
             - Issue summary
             - Terraform remediation options (avoiding gcloud CLI)
             - Best option recommendation & rationale
@@ -757,7 +769,7 @@ def process_scc_alert(cloud_event):
     if effective_status == "IGNORED":
         logger.info(
             f"ALERT IGNORED: Issue '{issue_type}' on '{resource_name}' is set to IGNORED. "
-            "Skipping Vertex AI and Google Chat dispatch."
+            "Skipping Gemini Triage Agent and Google Chat dispatch."
         )
         alert_record = {
             "message_id": message_id,
@@ -775,8 +787,8 @@ def process_scc_alert(cloud_event):
         alert_ref.set(alert_record)
         return (json.dumps({"status": "ignored", "alert_id": alert_doc_id}), 200)
 
-    # Step 3: Enriched Workflow for NOTIFIED Findings via ADK Triage Agent
-    logger.info(f"Generating ADK Triage Agent analysis for NOTIFIED finding: {issue_type}")
+    # Step 3: Enriched Workflow for NOTIFIED Findings via Gemini Triage Agent
+    logger.info(f"Generating Gemini Triage Agent analysis for NOTIFIED finding: {issue_type}")
     ai_analysis = run_scc_triage_agent(
         payload=payload,
         project_id=project_id,

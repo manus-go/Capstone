@@ -4,7 +4,7 @@ Interactive End-to-End (E2E) Test Runner for CloudGuard SecOps Pipeline
 ======================================================================
 This script:
 1. Publishes a real SCC security finding to Pub/Sub ('scc-high-alerts-topic').
-2. Verifies that Eventarc and Vertex AI process it and post the interactive
+2. Verifies that Eventarc and the Gemini Triage Agent process it and post the interactive
    Card V2 alert into your Google Chat space.
 3. Pauses and waits for YOU (the user) to click one of the interactive action
    buttons ('🛠️ Code Option 1', '🛠️ Code Option 2', or '🛑 Don't Act') in Google Chat.
@@ -174,9 +174,9 @@ def run_interactive_session():
         sys.exit(1)
 
     # Step 3: Wait for Cloud Function 'scc-alert-router' & Firestore Storage
-    log_step(3, "Waiting for Vertex AI Triage & Google Chat Dispatch")
+    log_step(3, "Waiting for Gemini Triage Agent & Google Chat Dispatch")
     log_info(f"Target Firestore Document: alerts/{expected_doc_id}")
-    log_info("Waiting for Cloud Function 'scc-alert-router' to process and invoke Vertex AI...")
+    log_info("Waiting for Cloud Function 'scc-alert-router' to process and invoke the Gemini Triage Agent...")
 
     firestore_url = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/alerts/{expected_doc_id}"
     alert_doc = None
@@ -208,7 +208,7 @@ def run_interactive_session():
 
     option_titles = []
     if fix_options:
-        log_pass(f"Vertex AI generated {len(fix_options)} remediation options:")
+        log_pass(f"Gemini Triage Agent generated {len(fix_options)} remediation options:")
         for idx, opt in enumerate(fix_options, 1):
             opt_fields = opt.get("mapValue", {}).get("fields", {})
             title = opt_fields.get("title", {}).get("stringValue", f"Option {idx}")

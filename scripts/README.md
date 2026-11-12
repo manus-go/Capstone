@@ -146,7 +146,7 @@ python3 scripts/simulate_scc_finding.py --finding-id demo-finding-01 --mute
 Once the bucket is created:
 1. **SCC Detection**: Security Health Analytics scans the project and creates the `PUBLIC_BUCKET_ACL` finding.
 2. **Pub/Sub Streaming**: Continuous Export pushes the active high/critical finding to `scc-high-alerts-topic`.
-3. **Alert Router Cloud Function**: `scc-alert-router` triages the finding with Vertex AI, records it in Cloud Firestore (`alerts/`), and sends a Card V2 alert to the Google Chat space.
+3. **Alert Router Cloud Function**: `scc-alert-router` triages the finding with the Gemini Triage Agent, records it in Cloud Firestore (`alerts/`), and sends a Card V2 alert to the Google Chat space.
 4. **Remediation**: Click the interactive **Code Fix** button in Google Chat or run the remediation receiver to generate a dedicated Git branch and GitHub Pull Request with the declarative Terraform fix.
 
 ---

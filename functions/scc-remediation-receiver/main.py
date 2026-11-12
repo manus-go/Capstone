@@ -742,6 +742,25 @@ def format_markdown_for_html(text: str) -> str:
     return "\n".join(output)
 
 
+def format_inline_markdown_for_html(text: str) -> str:
+    """
+    Formats single-line or inline markdown strings (such as Pros, Cons, and summaries)
+    into clean inline HTML without wrapping in block <p> tags, and strips any leading
+    +, -, *, or • list symbols.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"^[\s\+\-\*•]+", "", str(text).strip())
+    s = html.escape(cleaned)
+    s = re.sub(r"`([^`]+)`", r"<code style=\"background-color: rgba(110, 118, 129, 0.2); padding: 2px 6px; border-radius: 4px; font-family: monospace; color: #79c0ff;\">\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", s)
+    s = re.sub(r"(?<!_)_([^_]+)_(?!_)", r"<em>\1</em>", s)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"<a href=\"\2\" target=\"_blank\" style=\"color: #58a6ff; text-decoration: underline;\">\1</a>", s)
+    return s
+
+
 def build_pr_confirmation_card(
     finding_id: str,
     issue_type: str,
@@ -754,7 +773,8 @@ def build_pr_confirmation_card(
     branch_name: Optional[str] = None,
     file_path: Optional[str] = None,
     is_diff: bool = True,
-    additional_notes: str = ""
+    additional_notes: str = "",
+    severity: str = "HIGH"
 ) -> dict:
     """
     Constructs a minimalistic Google Chat Card V2 for the PR confirmation notification.
@@ -768,6 +788,7 @@ def build_pr_confirmation_card(
     clean_res = parsed["clean_resource_name"]
     asset_type = parsed["asset_type"]
     display_proj = parsed["project_id"]
+    clean_sev = str(severity or "HIGH").strip().upper()
 
     header = {
         "title": "✅ Remediation PR Staged",
@@ -780,7 +801,7 @@ def build_pr_confirmation_card(
             "decoratedText": {
                 "topLabel": f"TARGET {asset_type.upper()}",
                 "text": f"<b>{clean_res}</b>",
-                "bottomLabel": f"Project: {display_proj} &nbsp;|&nbsp; Severity: HIGH",
+                "bottomLabel": f"Project: {display_proj} &nbsp;|&nbsp; Severity: {clean_sev}",
                 "wrapText": True
             }
         },
@@ -834,147 +855,8 @@ def build_pr_confirmation_card(
     }
 
 
-def build_deep_dive_chat_card(
-    finding_id: str,
-    issue_type: str,
-    severity: str,
-    resource_name: str,
-    project_id: str,
-    ai_analysis: dict,
-    receiver_url: str = ""
-) -> dict:
-    """
-    Constructs a Google Chat Card V2 message with native collapsible sections:
-    - Section 1: Architectural Rationale & Trade-Offs (collapsible: true, uncollapsibleWidgetsCount: 1)
-    - Section 2: Compliance & Blast Radius Analysis (collapsible: true, uncollapsibleWidgetsCount: 1)
-    - Section 3: One-Click Remediation Actions (Option 1, Option 2, Don't Act, SCC Console)
-    Adheres to Card Exclusivity (only 'cardsV2').
-    """
-    parsed = parse_resource_display(resource_name, project_id)
-    clean_res = parsed["clean_resource_name"]
-    asset_type = parsed["asset_type"]
-    display_proj = parsed["project_id"]
-
-    severity_icon = {
-        "CRITICAL": "🔴",
-        "HIGH": "🟠",
-        "MEDIUM": "🟡",
-        "LOW": "🔵",
-    }.get(severity.upper(), "⚠️")
-
-    deep_reasoning = format_chat_card_html(ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided.")
-    compliance = format_chat_card_html(ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark.")
-    issue_summary = format_chat_card_html(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
-    rec_opt = ai_analysis.get("recommended_option_number") or ai_analysis.get("best_option", {}).get("recommended_option_number", 1)
-
-    scc_console_url = f"https://console.cloud.google.com/security/command-center/findings?project={display_proj}"
-
-    sections = [
-        {
-            "header": "⚡ Summary & Context",
-            "widgets": [
-                {
-                    "decoratedText": {
-                        "topLabel": f"ASSET ({asset_type.upper()})",
-                        "text": f"<b>{clean_res}</b>",
-                        "bottomLabel": f"Project: {display_proj} | Severity: {severity}",
-                        "wrapText": True
-                    }
-                },
-                {
-                    "textParagraph": {
-                        "text": f"<b>Overview:</b> {issue_summary}"
-                    }
-                }
-            ]
-        },
-        {
-            "header": "🧠 Architectural Rationale & Trade-Offs",
-            "collapsible": True,
-            "uncollapsibleWidgetsCount": 1,
-            "widgets": [
-                {
-                    "textParagraph": {
-                        "text": f"<b>Why Option {rec_opt} is recommended:</b> (Click header to toggle details)"
-                    }
-                },
-                {
-                    "textParagraph": {
-                        "text": deep_reasoning
-                    }
-                }
-            ]
-        },
-        {
-            "header": "🛡️ Compliance & Blast Radius Analysis",
-            "collapsible": True,
-            "uncollapsibleWidgetsCount": 1,
-            "widgets": [
-                {
-                    "textParagraph": {
-                        "text": "<b>Workload Blast Radius & Compliance Scope:</b> (Click header to toggle details)"
-                    }
-                },
-                {
-                    "textParagraph": {
-                        "text": compliance
-                    }
-                }
-            ]
-        }
-    ]
-
-    buttons = []
-    if receiver_url and finding_id:
-        buttons.append({
-            "text": "🛠️ Fix via Option 1",
-            "onClick": {"openLink": {"url": f"{receiver_url}/?finding_id={finding_id}&option=1"}}
-        })
-        buttons.append({
-            "text": "🛠️ Fix via Option 2",
-            "onClick": {"openLink": {"url": f"{receiver_url}/?finding_id={finding_id}&option=2"}}
-        })
-        buttons.append({
-            "text": "🛑 Don't Act",
-            "onClick": {"openLink": {"url": f"{receiver_url}/?finding_id={finding_id}&action=ignore"}}
-        })
-    buttons.append({
-        "text": "↗️ Open SCC Console",
-        "onClick": {"openLink": {"url": scc_console_url}}
-    })
-
-    sections.append({
-        "header": "⚡ One-Click Remediation Actions",
-        "widgets": [
-            {
-                "buttonList": {
-                    "buttons": buttons
-                }
-            }
-        ]
-    })
-
-    return {
-        "cardsV2": [
-            {
-                "cardId": f"deep_dive_{sanitize_doc_id(finding_id)}",
-                "card": {
-                    "header": {
-                        "title": f"{severity_icon} Deep Dive: {issue_type}",
-                        "subtitle": f"{clean_res} ({asset_type}) • {display_proj}",
-                        "imageUrl": "https://www.gstatic.com/images/branding/product/2x/security_48dp.png",
-                        "imageType": "CIRCLE"
-                    },
-                    "sections": sections
-                }
-            }
-        ]
-    }
-
-
-
 # -----------------------------------------------------------------------------
-# Google ADK Remediation Agent: Autonomous Multi-Tool GitOps Pipeline
+# Gemini Remediation Agent: Autonomous Multi-Tool GitOps Pipeline
 # -----------------------------------------------------------------------------
 def run_scc_remediation_agent(
     alert_doc_ref,
@@ -995,12 +877,9 @@ def run_scc_remediation_agent(
     progress_callback: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
-    Invokes the Google Agent Development Kit (ADK) autonomous Remediation Agent
-    equipped with 4 specialized operational tools:
+    Invokes the autonomous Gemini Remediation Agent equipped with operational GitOps tools:
     1. validate_terraform_code
-    2. create_github_pull_request_tool
-    3. record_remediation_audit
-    4. dispatch_google_chat_notification
+    2. create_github_pull_request_tool (stages branch/PR and triggers concurrent Firestore audit + Google Chat notification)
     """
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
     os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
@@ -1064,7 +943,7 @@ def run_scc_remediation_agent(
 
         agent_state["terraform_code"] = terraform_code
         agent_state["resource_type"] = resource_type
-        logger.info(f"ADK Tool [validate_terraform_code]: Validated {len(terraform_code)} chars for {resource_type}.")
+        logger.info(f"Gemini Tool [validate_terraform_code]: Validated {len(terraform_code)} chars for {resource_type}.")
         if progress_callback:
             try:
                 progress_callback(
@@ -1082,126 +961,7 @@ def run_scc_remediation_agent(
             "message": f"Terraform code for '{resource_type}' validated successfully ({len(terraform_code)} characters, {open_braces} blocks)."
         }
 
-    # Tool 2: create_github_pull_request_tool
-    def create_github_pull_request_tool(
-        file_path: str = "",
-        commit_message: str = "",
-        pr_title: str = "",
-        pr_summary: str = ""
-    ) -> dict:
-        """Stages the validated Terraform code onto a new Git branch and opens a GitHub Pull Request for human review.
-
-        Args:
-            file_path: Relative repository file path for the Terraform code (e.g. infrastructure/main.tf or remediations/open_ssh_port_firewall.tf).
-            commit_message: Descriptive Git commit message explaining the security remediation.
-            pr_title: Title for the GitHub Pull Request (e.g. [SecOps Fix] Remediate PUBLIC_BUCKET_ACL).
-            pr_summary: Detailed description of what is causing the issue, the risk, and the recommended fix.
-        """
-        tf_code = agent_state.get("terraform_code")
-        if not tf_code:
-            return {"success": False, "error": "No validated Terraform code found. Call validate_terraform_code first."}
-
-        agent_state["explanation"] = pr_summary
-
-        if not github_token or not github_repo:
-            agent_state["pr_result"] = {"success": False, "skipped": True, "error": "GitHub credentials not configured"}
-            return {"success": False, "status": "SKIPPED", "message": "GitHub repository/token not configured; staging in Firestore only."}
-
-        if progress_callback:
-            try:
-                progress_callback(
-                    step_num=4,
-                    pct=70,
-                    status_text="Staging Terraform configuration to dedicated GitOps branch...",
-                    step_text="Committing code and opening Pull Request via GitHub REST API...",
-                    orb_status="Staging Pull Request"
-                )
-            except Exception as pe:
-                logger.debug(f"Progress callback notification error: {pe}")
-
-        chosen_path = file_path.strip() if file_path and file_path.strip() else target_file_path
-        chosen_sha = baseline_sha if (chosen_path == "infrastructure/main.tf" and baseline_sha) else None
-
-        pr_res = create_github_pull_request(
-            repo=github_repo,
-            token=github_token,
-            base_branch=github_base_branch,
-            issue_type=issue_type,
-            resource_name=resource_name,
-            finding_id=finding_id,
-            option_number=target_num,
-            option_title=selected_option.get("title", f"Option {target_num}"),
-            option_strategy=selected_option.get("strategy", ""),
-            terraform_code=tf_code,
-            explanation=pr_summary,
-            execution_instructions="1. git checkout <branch>\n2. terraform plan\n3. terraform apply",
-            file_path=chosen_path,
-            existing_file_sha=chosen_sha,
-            what_is_causing_issue=description,
-            risk_summary=selected_option.get("trade_offs") or selected_option.get("strategy", ""),
-            recommended_fix=selected_option.get("strategy", "")
-        )
-        agent_state["pr_result"] = pr_res
-        logger.info(f"ADK Tool [create_github_pull_request_tool]: PR Result: success={pr_res.get('success')} (PR #{pr_res.get('pr_number')})")
-
-        # Parallelize Post-PR operations (Firestore audit recording + Google Chat notification)
-        logger.info("Executing post-PR tasks (Firestore audit + Chat notification) in parallel...")
-        def _parallel_audit():
-            return record_remediation_audit(
-                audit_status="PR_OPENED_NOT_APPLIED" if pr_res.get("success") else "CODE_GENERATED_STAGED",
-                audit_notes="Autonomous audit recorded concurrently with chat notification."
-            )
-
-        def _parallel_chat():
-            if not agent_state.get("chat_msg_text"):
-                if pr_res.get("success") and pr_res.get("pr_url"):
-                    c_msg = (
-                        f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
-                        f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                        f"• *Pull Request:* <{pr_res.get('pr_url')}|PR #{pr_res.get('pr_number')}: [SecOps Fix] Remediate {issue_type}>\n"
-                        f"• *Branch:* `{pr_res.get('branch_name')}`\n"
-                        f"• *File:* `{pr_res.get('file_path')}`\n\n"
-                        f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
-                        f"It *has NOT been applied* to live infrastructure."
-                    )
-                else:
-                    c_msg = (
-                        f"✅ *Terraform Fix Prepared!*\n\n"
-                        f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
-                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
-                        f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
-                    )
-                agent_state["chat_msg_text"] = c_msg
-            return dispatch_google_chat_notification(agent_state["chat_msg_text"])
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as post_executor:
-            fut_audit = post_executor.submit(_parallel_audit)
-            fut_chat = post_executor.submit(_parallel_chat)
-            try:
-                fut_audit.result(timeout=15)
-            except Exception as ex:
-                logger.error(f"Parallel audit recording error: {ex}")
-            try:
-                fut_chat.result(timeout=15)
-            except Exception as ex:
-                logger.error(f"Parallel chat notification error: {ex}")
-
-        if progress_callback:
-            try:
-                progress_callback(
-                    step_num=5,
-                    pct=92,
-                    status_text="Audit trail persisted & Google Chat notified concurrently.",
-                    step_text="Firestore audit persisted and Google Chat notification dispatched.",
-                    orb_status="Remediation Finalized"
-                )
-            except Exception as pe:
-                logger.debug(f"Progress callback notification error: {pe}")
-
-        return pr_res
-
-    # Tool 3: record_remediation_audit
+    # Internal Helper: record_remediation_audit (executed concurrently upon PR staging)
     def record_remediation_audit(
         audit_status: str,
         audit_notes: str
@@ -1213,7 +973,7 @@ def run_scc_remediation_agent(
             audit_notes: Technical summary of the remediation actions taken by the agent.
         """
         if agent_state.get("audit_result"):
-            logger.info("ADK Tool [record_remediation_audit]: Already recorded; returning cached result.")
+            logger.info("Remediation audit already recorded; returning cached result.")
             return agent_state["audit_result"]
 
         tf_code = agent_state.get("terraform_code", "")
@@ -1231,6 +991,7 @@ def run_scc_remediation_agent(
             },
             "status": "PR_OPENED_NOT_APPLIED" if pr_success else audit_status,
             "terraform_code": tf_code,
+            "explanation": agent_state.get("explanation") or "",
             "audit_notes": audit_notes,
             "user_response_text": user_text or f"Option {target_num}",
             "generated_at": firestore.SERVER_TIMESTAMP
@@ -1264,10 +1025,10 @@ def run_scc_remediation_agent(
         db.collection("remediations").document(f"{issue_type}_{finding_id}").set(remediation_record)
         agent_state["remediation_record"] = remediation_record
         agent_state["audit_result"] = {"status": "RECORDED", "audit_id": f"{issue_type}_{finding_id}"}
-        logger.info("ADK Tool [record_remediation_audit]: Successfully recorded audit in Firestore.")
+        logger.info("Successfully recorded remediation audit in Firestore.")
         return {"status": "RECORDED", "audit_id": f"{issue_type}_{finding_id}"}
 
-    # Tool 4: dispatch_google_chat_notification
+    # Internal Helper: dispatch_google_chat_notification (executed concurrently upon PR staging)
     def dispatch_google_chat_notification(
         notification_message: str
     ) -> dict:
@@ -1277,17 +1038,18 @@ def run_scc_remediation_agent(
             notification_message: Formatted text or markdown notification to broadcast to the Google Chat space.
         """
         if agent_state.get("chat_notified"):
-            logger.info("ADK Tool [dispatch_google_chat_notification]: Already notified; returning cached result.")
+            logger.info("Google Chat notification already dispatched; returning cached result.")
             return {"status": "SUCCESS", "message": "Notification already dispatched."}
 
         agent_state["chat_msg_text"] = notification_message
         if not chat_webhook_url or not chat_webhook_url.strip():
-            logger.info("ADK Tool [dispatch_google_chat_notification]: Chat webhook URL not set; skipped.")
+            logger.info("Chat webhook URL not set; skipped.")
             return {"status": "SKIPPED", "reason": "No webhook URL provided"}
 
         pr_res = agent_state.get("pr_result") or {}
         pr_card = None
         if pr_res.get("pr_url"):
+            finding_sev = str(alert_data.get("severity") or finding_raw.get("severity") or "HIGH")
             pr_card = build_pr_confirmation_card(
                 finding_id=finding_id,
                 issue_type=issue_type,
@@ -1300,7 +1062,8 @@ def run_scc_remediation_agent(
                 branch_name=pr_res.get("branch_name"),
                 file_path=pr_res.get("file_path"),
                 is_diff=bool(pr_res.get("is_diff")),
-                additional_notes=notification_message
+                additional_notes=notification_message,
+                severity=finding_sev
             )
 
         clean_text = format_google_chat_markdown(notification_message)
@@ -1310,24 +1073,156 @@ def run_scc_remediation_agent(
             card_payload=pr_card
         )
         agent_state["chat_notified"] = True
-        logger.info("ADK Tool [dispatch_google_chat_notification]: Dispatched to Google Chat.")
+        logger.info("Dispatched PR confirmation to Google Chat.")
         return {"status": "SUCCESS", "message": "Notification dispatched to Google Chat space."}
 
+    # Tool 2: create_github_pull_request_tool
+    def create_github_pull_request_tool(
+        file_path: str,
+        what_is_causing_issue: str,
+        security_risk_impact: str,
+        recommended_fix_summary: str,
+        architectural_rationale: str
+    ) -> dict:
+        """Stages the validated Terraform code onto a new Git branch and opens a GitHub Pull Request for human review.
+
+        Args:
+            file_path: Relative repository file path for the Terraform code (e.g. infrastructure/main.tf or remediations/open_ssh_port_firewall.tf).
+            what_is_causing_issue: Concise 1 to 2 sentence technical summary of the root misconfiguration causing the finding.
+            security_risk_impact: Concrete 1 to 2 sentence statement of the security exposure, attack vector, or breach impact (do NOT list pros/cons here).
+            recommended_fix_summary: Concise 1 to 2 sentence summary of the exact declarative Terraform changes staged in the target file.
+            architectural_rationale: Crisp 2 to 3 sentence executive engineering rationale covering root cause eliminated, architectural trade-offs, and expected blast radius.
+        """
+        tf_code = agent_state.get("terraform_code")
+        if not tf_code:
+            return {"success": False, "error": "No validated Terraform code found. Call validate_terraform_code first."}
+
+        rationale_clean = (architectural_rationale or "").strip() or (recommended_fix_summary or "").strip()
+        agent_state["explanation"] = rationale_clean
+
+        if not github_token or not github_repo:
+            agent_state["pr_result"] = {"success": False, "skipped": True, "error": "GitHub credentials not configured"}
+            return {"success": False, "status": "SKIPPED", "message": "GitHub repository/token not configured; staging in Firestore only."}
+
+        if progress_callback:
+            try:
+                progress_callback(
+                    step_num=4,
+                    pct=70,
+                    status_text="Staging Terraform configuration to dedicated GitOps branch...",
+                    step_text="Committing code and opening Pull Request via GitHub REST API...",
+                    orb_status="Staging Pull Request"
+                )
+            except Exception as pe:
+                logger.debug(f"Progress callback notification error: {pe}")
+
+        chosen_path = file_path.strip() if file_path and file_path.strip() else target_file_path
+        chosen_sha = baseline_sha if (chosen_path == "infrastructure/main.tf" and baseline_sha) else None
+
+        fallback_risk = (
+            alert_data.get("ai_analysis", {}).get("issue_summary")
+            or f"Unrestricted {issue_type} exposure on {resource_name} could permit unauthorised access."
+        )
+        cause_val = (what_is_causing_issue or "").strip() or description
+        risk_val = (security_risk_impact or "").strip() or fallback_risk
+        fix_val = (recommended_fix_summary or "").strip() or selected_option.get("strategy", "")
+
+        pr_res = create_github_pull_request(
+            repo=github_repo,
+            token=github_token,
+            base_branch=github_base_branch,
+            issue_type=issue_type,
+            resource_name=resource_name,
+            finding_id=finding_id,
+            option_number=target_num,
+            option_title=selected_option.get("title", f"Option {target_num}"),
+            option_strategy=selected_option.get("strategy", ""),
+            terraform_code=tf_code,
+            explanation=rationale_clean,
+            execution_instructions="1. git checkout <branch>\n2. terraform plan\n3. terraform apply",
+            file_path=chosen_path,
+            existing_file_sha=chosen_sha,
+            what_is_causing_issue=cause_val,
+            risk_summary=risk_val,
+            recommended_fix=fix_val
+        )
+        agent_state["pr_result"] = pr_res
+        logger.info(f"Gemini Tool [create_github_pull_request_tool]: PR Result: success={pr_res.get('success')} (PR #{pr_res.get('pr_number')})")
+
+        # Parallelize Post-PR operations (Firestore audit recording + Google Chat notification)
+        logger.info("Executing post-PR tasks (Firestore audit + Chat notification) in parallel...")
+        def _parallel_audit():
+            return record_remediation_audit(
+                audit_status="PR_OPENED_NOT_APPLIED" if pr_res.get("success") else "CODE_GENERATED_STAGED",
+                audit_notes="Autonomous audit recorded concurrently with chat notification."
+            )
+
+        def _parallel_chat():
+            if not agent_state.get("chat_msg_text"):
+                if pr_res.get("success") and pr_res.get("pr_url"):
+                    c_msg = (
+                        f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
+                        f"The autonomous Gemini remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                        f"• *Pull Request:* <{pr_res.get('pr_url')}|PR #{pr_res.get('pr_number')}: [SecOps Fix] Remediate {issue_type}>\n"
+                        f"• *Branch:* `{pr_res.get('branch_name')}`\n"
+                        f"• *File:* `{pr_res.get('file_path')}`\n\n"
+                        f"🔒 *Safety Policy:* The fix has been submitted as a Git Pull Request for human review. "
+                        f"It *has NOT been applied* to live infrastructure."
+                    )
+                else:
+                    c_msg = (
+                        f"✅ *Terraform Fix Prepared!*\n\n"
+                        f"The autonomous Gemini remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                        f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
+                        f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
+                    )
+                agent_state["chat_msg_text"] = c_msg
+            return dispatch_google_chat_notification(agent_state["chat_msg_text"])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as post_executor:
+            fut_audit = post_executor.submit(_parallel_audit)
+            fut_chat = post_executor.submit(_parallel_chat)
+            try:
+                fut_audit.result(timeout=15)
+            except Exception as ex:
+                logger.error(f"Parallel audit recording error: {ex}")
+            try:
+                fut_chat.result(timeout=15)
+            except Exception as ex:
+                logger.error(f"Parallel chat notification error: {ex}")
+
+        if progress_callback:
+            try:
+                progress_callback(
+                    step_num=5,
+                    pct=92,
+                    status_text="Audit trail persisted & Google Chat notified concurrently.",
+                    step_text="Firestore audit persisted and Google Chat notification dispatched.",
+                    orb_status="Remediation Finalised"
+                )
+            except Exception as pe:
+                logger.debug(f"Progress callback notification error: {pe}")
+
+        return pr_res
+
     agent_instruction = (
-        "You are an autonomous Principal SecOps & GitOps Remediation Agent powered by Google ADK (Agent Development Kit).\n"
+        "You are an autonomous Principal SecOps & GitOps Gemini Remediation Agent.\n"
         "Your mission is to take an approved Security Command Center (SCC) remediation strategy and "
-        "execute the end-to-end GitOps remediation workflow using your provided tools.\n\n"
+        "execute the GitOps remediation workflow cleanly and accurately using your provided tools.\n\n"
         "STRICT EXECUTION ORDER:\n"
         "1. Write complete, syntactically valid Terraform (HCL) code implementing the selected remediation option.\n"
         "   - If baseline infrastructure code is provided, output the COMPLETE updated file modifying the vulnerable resource in-place (e.g. enabling uniform_bucket_level_access = true, deleting public google_storage_bucket_access_control) while keeping all compliant resources intact. This ensures a clean red/green diff in GitHub.\n"
         "   - If no baseline is provided, write standalone Terraform HCL for official google provider resources.\n"
         "   - Do NOT use dummy pseudocode or incomplete placeholders.\n"
-        "   - Add explanatory comments for each security setting.\n"
+        "   - Add concise inline comments explaining each security control.\n"
         "2. Call `validate_terraform_code` to verify the HCL syntax and structural integrity.\n"
-        "3. Call `create_github_pull_request_tool` to commit the code onto a dedicated branch and open a PR.\n"
-        "4. Call `record_remediation_audit` to write the full audit trail and PR metadata to Firestore.\n"
-        "5. Call `dispatch_google_chat_notification` to notify the team in Google Chat with the PR link and human review safety assurance (staged in Git, NOT applied). When formatting the notification message, do NOT use CommonMark double asterisks (**word**) or indented asterisk bullets (*   item). Use Google Chat formatting: single asterisk for bold (*word*), bullet symbols (• item), and clean key-value lines.\n"
-        "6. Provide a crisp, professional 2-3 sentence executive engineering rationale summarizing: (1) root misconfiguration eliminated, (2) architectural trade-offs, and (3) expected blast radius. Avoid meta-commentary, fluff, and filler words."
+        "3. Call `create_github_pull_request_tool` to commit the validated code onto a dedicated branch and open a Pull Request (which automatically persists the Firestore audit trail and dispatches the Google Chat confirmation concurrently):\n"
+        "   - `what_is_causing_issue`: 1 to 2 sentences explaining the exact misconfiguration.\n"
+        "   - `security_risk_impact`: 1 to 2 sentences stating the concrete exploit vector and exposure impact (NEVER paste pros/cons here).\n"
+        "   - `recommended_fix_summary`: 1 to 2 sentences summarising the declarative Terraform changes staged in `file_path`.\n"
+        "   - `architectural_rationale`: 2 to 3 crisp sentences covering root cause eliminated, architectural trade-offs, and expected blast radius.\n"
+        "4. Conclude with a concise 2 to 3 sentence executive engineering summary without filler or meta-commentary."
     )
 
     remediation_agent = Agent(
@@ -1336,9 +1231,7 @@ def run_scc_remediation_agent(
         instruction=agent_instruction,
         tools=[
             validate_terraform_code,
-            create_github_pull_request_tool,
-            record_remediation_audit,
-            dispatch_google_chat_notification
+            create_github_pull_request_tool
         ]
     )
 
@@ -1354,7 +1247,7 @@ def run_scc_remediation_agent(
         baseline_section = f"""
 [Existing Baseline Infrastructure Code (infrastructure/main.tf)]
 We maintain an existing baseline Terraform configuration in `infrastructure/main.tf` in the repository.
-Instead of creating a new isolated file, you MUST modify this existing configuration to remediate the vulnerability (e.g., set `uniform_bucket_level_access = true` on the vulnerable bucket and delete the public `google_storage_bucket_access_control` resource) while preserving all other resources intact.
+Instead of creating a new isolated file, you MUST modify this existing configuration to remediate the vulnerability (e.g. set `uniform_bucket_level_access = true` on the vulnerable bucket and delete the public `google_storage_bucket_access_control` resource) while preserving all other resources intact.
 
 ```hcl
 {baseline_content}
@@ -1389,7 +1282,7 @@ Execute the required steps using your tools now.
     session_id = f"remediate_{sanitize_doc_id(resource_name)}_{int(time.time()*1000)}"
     content = types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])
 
-    logger.info(f"Running ADK Remediation Agent for finding: {issue_type} on {resource_name}")
+    logger.info(f"Running Gemini Remediation Agent for finding: {issue_type} on {resource_name}")
     raw_output_parts = []
     for event in runner.run(user_id="scc_pipeline", session_id=session_id, new_message=content):
         if event.message and event.message.parts:
@@ -1398,14 +1291,17 @@ Execute the required steps using your tools now.
                     raw_output_parts.append(part.text)
 
     raw_response_text = "\n".join(raw_output_parts)
-    logger.info(f"ADK Remediation Agent execution finished. Output length: {len(raw_response_text)} chars.")
+    logger.info(f"Gemini Remediation Agent execution finished. Output length: {len(raw_response_text)} chars.")
 
     # Validation: Ensure agent fulfilled zero-fallback requirement
     if not agent_state.get("terraform_code"):
         raise RuntimeError(
-            f"ADK Remediation Agent failed to generate and validate Terraform HCL code for {issue_type}. "
+            f"Gemini Remediation Agent failed to generate and validate Terraform HCL code for {issue_type}. "
             f"Zero fallback policy enforced. Raw output: {raw_response_text[:300]}"
         )
+
+    if not agent_state.get("explanation"):
+        agent_state["explanation"] = raw_response_text or f"Autonomous Terraform remediation implementing Option {target_num}: {selected_option.get('title')}."
 
     # Guarantee audit recording and chat notification in parallel if skipped by model
     pr_res = agent_state.get("pr_result") or {}
@@ -1433,7 +1329,7 @@ Execute the required steps using your tools now.
                     if pr_success and pr_url:
                         chat_msg = (
                             f"🚀 *GitHub Pull Request Opened for Review!*\n\n"
-                            f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                            f"The autonomous Gemini remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
                             f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
                             f"🔗 *Pull Request:* <{pr_url}|PR #{pr_number}: [SecOps Fix] Remediate {issue_type}>\n"
                             f"🌿 *Branch:* `{branch_name}`\n"
@@ -1444,7 +1340,7 @@ Execute the required steps using your tools now.
                     else:
                         chat_msg = (
                             f"✅ *Terraform Fix Prepared!*\n\n"
-                            f"The autonomous Google ADK remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
+                            f"The autonomous Gemini remediation agent has coded the Terraform fix for *{issue_type}* on `{resource_name}` "
                             f"based on *Option {target_num}: {selected_option.get('title')}*.\n\n"
                             f"🔒 *Safety Policy:* The configuration has been safely staged in Firestore and *has NOT been applied* to live infrastructure."
                         )
@@ -1458,9 +1354,6 @@ Execute the required steps using your tools now.
                     f.result(timeout=15)
                 except Exception as ex:
                     logger.error(f"Post-agent guarantee execution error: {ex}")
-
-    if not agent_state.get("explanation"):
-        agent_state["explanation"] = raw_response_text or f"Autonomous Terraform remediation implementing Option {target_num}: {selected_option.get('title')}."
 
     return agent_state
 
@@ -1789,7 +1682,7 @@ def render_deep_dive_html_page(
         "LOW": "🔵",
     }.get(severity.upper(), "⚠️")
 
-    summary = format_markdown_for_html(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
+    summary = format_inline_markdown_for_html(ai_analysis.get("issue_summary") or "Security Command Center finding detected.")
     deep_reasoning = format_markdown_for_html(ai_analysis.get("deep_architectural_reasoning") or ai_analysis.get("best_option", {}).get("reasoning") or "No deep architectural rationale provided.")
     compliance = format_markdown_for_html(ai_analysis.get("compliance_and_blast_radius") or "Complies with Google Cloud Security Foundations and CIS GCP Benchmark.")
     fix_options = ai_analysis.get("fix_options") or []
@@ -1801,14 +1694,14 @@ def render_deep_dive_html_page(
     for opt in fix_options:
         opt_num = opt.get("option_number", 1)
         opt_title = html.escape(opt.get("title", f"Option {opt_num}"))
-        opt_summary = format_markdown_for_html(opt.get("summary") or opt.get("strategy") or "")
+        opt_summary = format_inline_markdown_for_html(opt.get("summary") or opt.get("strategy") or "")
         pros = opt.get("pros") or []
         cons = opt.get("cons") or []
         is_rec = (opt_num == rec_opt)
-        badge = '<span class="rec-badge">⭐ AI RECOMMENDED</span>' if is_rec else ''
+        badge = '<span class="rec-badge">⭐ RECOMMENDED</span>' if is_rec else ''
 
-        pros_html = "".join([f"<li>+ {format_markdown_for_html(p)}</li>" for p in pros]) if pros else "<li>+ Follows security best practices</li>"
-        cons_html = "".join([f"<li>- {format_markdown_for_html(c)}</li>" for c in cons]) if cons else "<li>- Requires standard peer review</li>"
+        pros_html = "".join([f"<li>{format_inline_markdown_for_html(p)}</li>" for p in pros]) if pros else "<li>Follows security best practices</li>"
+        cons_html = "".join([f"<li>{format_inline_markdown_for_html(c)}</li>" for c in cons]) if cons else "<li>Requires standard peer review</li>"
 
         options_html += f"""
         <div class="option-card {'recommended' if is_rec else ''}">
@@ -2124,6 +2017,10 @@ def render_deep_dive_html_page(
                 <span class="info-label">Full Resource URI:</span>
                 <span class="info-value"><code>{escaped_resource}</code></span>
             </div>
+            <div class="info-row">
+                <span class="info-label">Issue &amp; Risk:</span>
+                <span class="info-value">{summary}</span>
+            </div>
         </div>
 
         <div class="deep-section">
@@ -2148,440 +2045,6 @@ def render_deep_dive_html_page(
             </a>
         </div>
     </div>
-</body>
-</html>
-"""
-
-
-# -----------------------------------------------------------------------------
-# Deep Dive HTML Loading Page Renderer (Instant Browser Feedback with Solving Orb)
-# -----------------------------------------------------------------------------
-def render_deep_dive_loading_page(
-    finding_id: str,
-    issue_type: str,
-    resource_name: str,
-    severity: str = "HIGH"
-) -> str:
-    escaped_finding = html.escape(finding_id)
-    escaped_issue = html.escape(issue_type)
-    escaped_resource = html.escape(resource_name)
-    escaped_severity = html.escape(severity)
-
-    severity_icon = {
-        "CRITICAL": "🔴",
-        "HIGH": "🟠",
-        "MEDIUM": "🟡",
-        "LOW": "🔵",
-    }.get(severity.upper(), "⚠️")
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Analyzing {escaped_issue} | CloudGuard SecOps Deep Dive</title>
-    <style>
-        :root {{
-            --bg-color: #0d1117;
-            --card-bg: #161b22;
-            --border-color: #30363d;
-            --text-primary: #c9d1d9;
-            --text-secondary: #8b949e;
-            --accent-blue: #38bdf8;
-            --accent-green: #10b981;
-            --accent-yellow: #d29922;
-            --accent-red: #f85149;
-        }}
-        * {{ box-sizing: border-box; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            margin: 0;
-            padding: 40px 20px;
-            display: flex;
-            justify-content: center;
-        }}
-        .card {{
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            max-width: 860px;
-            width: 100%;
-            padding: 32px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-        }}
-        .badge {{
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 14px;
-            margin-bottom: 16px;
-        }}
-        .pulse-badge {{
-            background-color: rgba(56, 189, 248, 0.15);
-            color: var(--accent-blue);
-            border: 1px solid rgba(56, 189, 248, 0.4);
-        }}
-        .error-badge {{
-            background-color: rgba(248, 81, 73, 0.15);
-            color: var(--accent-red);
-            border: 1px solid rgba(248, 81, 73, 0.4);
-        }}
-        h2 {{
-            margin: 0 0 8px 0;
-            font-size: 24px;
-            color: #ffffff;
-        }}
-        .subtitle {{
-            color: var(--text-secondary);
-            font-size: 15px;
-            margin-bottom: 24px;
-            line-height: 1.4;
-        }}
-        .info-card {{
-            background-color: #1f242c;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 16px 20px;
-            margin-bottom: 24px;
-        }}
-        .info-row {{
-            display: flex;
-            align-items: baseline;
-            gap: 12px;
-            padding: 6px 0;
-            border-bottom: 1px solid #282e38;
-            font-size: 14px;
-        }}
-        .info-row:last-child {{ border-bottom: none; }}
-        .info-label {{
-            color: var(--text-secondary);
-            font-weight: 600;
-            min-width: 140px;
-            flex-shrink: 0;
-        }}
-        .info-value {{
-            color: var(--text-primary);
-            word-break: break-all;
-        }}
-        .info-value code {{
-            background-color: rgba(110, 118, 129, 0.2);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-family: "SFMono-Regular", Consolas, Menlo, monospace;
-            font-size: 13px;
-            color: #79c0ff;
-        }}
-        .orb-wrapper {{
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-            margin: 20px 0 28px 0;
-            padding: 12px 0;
-        }}
-        .orb-glow-backdrop {{
-            position: absolute;
-            width: 190px;
-            height: 190px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(56, 189, 248, 0.22) 0%, rgba(16, 185, 129, 0.15) 45%, rgba(13, 17, 23, 0) 70%);
-            filter: blur(22px);
-            pointer-events: none;
-            animation: orb-breathe 3.5s ease-in-out infinite alternate;
-        }}
-        @keyframes orb-breathe {{
-            0% {{ transform: scale(0.88); opacity: 0.55; }}
-            100% {{ transform: scale(1.18); opacity: 0.95; }}
-        }}
-        #solving-orb-canvas {{
-            width: 200px;
-            height: 200px;
-            z-index: 1;
-        }}
-        .orb-status-caption {{
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 10px;
-            padding: 6px 16px;
-            border-radius: 20px;
-            background: rgba(22, 27, 34, 0.85);
-            border: 1px solid rgba(56, 189, 248, 0.3);
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.4px;
-            color: #38bdf8;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-            z-index: 1;
-        }}
-        .orb-status-dot {{
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background-color: #10b981;
-            box-shadow: 0 0 8px #10b981;
-            animation: orb-dot-pulse 1.4s ease-in-out infinite;
-        }}
-        @keyframes orb-dot-pulse {{
-            0%, 100% {{ transform: scale(0.8); opacity: 0.5; }}
-            50% {{ transform: scale(1.3); opacity: 1; }}
-        }}
-        .status-indicator {{
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 13px;
-            color: var(--text-secondary);
-            margin-top: 10px;
-        }}
-        .error-box {{
-            background-color: rgba(248, 81, 73, 0.1);
-            border: 1px solid var(--accent-red);
-            border-radius: 6px;
-            padding: 16px;
-            color: #ff7b72;
-            font-size: 14px;
-            margin: 20px 0;
-            word-break: break-all;
-        }}
-        .retry-button {{
-            background-color: #21262d;
-            color: #c9d1d9;
-            border: 1px solid #30363d;
-            padding: 10px 18px;
-            border-radius: 6px;
-            font-weight: 600;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }}
-        .retry-button:hover {{
-            background-color: #30363d;
-            color: #ffffff;
-        }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div id="loading-view">
-            <div class="badge pulse-badge">
-                <span class="orb-status-dot"></span>
-                <span>Security Architecture Analysis</span>
-            </div>
-            <h2>Analyzing: {severity_icon} {escaped_issue}</h2>
-            <div class="subtitle">CloudGuard SecOps AI Agent is retrieving comprehensive architectural reasoning, compliance mapping, and blast radius analysis...</div>
-
-            <div class="info-card">
-                <div class="info-row">
-                    <span class="info-label">Finding ID:</span>
-                    <span class="info-value"><code>{escaped_finding}</code></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Target Resource:</span>
-                    <span class="info-value"><code>{escaped_resource}</code></span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Severity:</span>
-                    <span class="info-value">{severity_icon} <strong>{escaped_severity}</strong></span>
-                </div>
-            </div>
-
-            <!-- SOLVING ORB -->
-            <div class="orb-wrapper">
-                <div class="orb-glow-backdrop"></div>
-                <canvas id="solving-orb-canvas" width="220" height="220"></canvas>
-                <div class="orb-status-caption">
-                    <span class="orb-status-dot"></span>
-                    <span id="orb-status-text">Retrieving Gemini Architecture Intelligence</span>
-                </div>
-            </div>
-
-            <div class="status-indicator">
-                <span id="loading-subtext">Fetching root cause analysis, compliance benchmarks, and remediation options...</span>
-                <span id="elapsed-time">Elapsed: 0s</span>
-            </div>
-        </div>
-
-        <div id="error-view" style="display: none;">
-            <div class="badge error-badge">
-                <span>⚠️</span>
-                <span>Analysis Retrieval Error</span>
-            </div>
-            <h2>Unable to Load Deep Dive Analysis</h2>
-            <div id="error-message" class="error-box"></div>
-            <button class="retry-button" onclick="location.reload()">Retry Analysis</button>
-        </div>
-    </div>
-
-    <script>
-        const startTime = Date.now();
-        const elapsedTimer = setInterval(() => {{
-            const elapsed = Math.floor((Date.now() - startTime) / 1000);
-            const el = document.getElementById('elapsed-time');
-            if (el) el.innerText = 'Elapsed: ' + elapsed + 's';
-        }}, 1000);
-
-        function initSolvingOrb() {{
-            const canvas = document.getElementById('solving-orb-canvas');
-            if (!canvas) return;
-            const ctx = canvas.getContext('2d');
-            const dpr = window.devicePixelRatio || 1;
-            const size = 220;
-            canvas.width = size * dpr;
-            canvas.height = size * dpr;
-            ctx.scale(dpr, dpr);
-
-            const cx = size / 2;
-            const cy = size / 2;
-
-            const orbits = [
-                {{ rx: 76, ry: 25, tilt: -0.45, speed: 0.022 }},
-                {{ rx: 80, ry: 28, tilt: 0.62, speed: -0.018 }},
-                {{ rx: 84, ry: 30, tilt: 1.25, speed: 0.016 }},
-                {{ rx: 72, ry: 23, tilt: -0.95, speed: -0.024 }}
-            ];
-
-            const palette = ['#38bdf8', '#10b981', '#6ee7b7', '#7dd3fc', '#a7f3d0'];
-
-            const particles = [];
-            const particleCount = 52;
-            for (let i = 0; i < particleCount; i++) {{
-                const orbIdx = i % orbits.length;
-                particles.push({{
-                    orbit: orbIdx,
-                    angle: (Math.PI * 2 / (particleCount / orbits.length)) * Math.floor(i / orbits.length) + (Math.random() * 0.4),
-                    speed: (0.014 + Math.random() * 0.01) * (i % 2 === 0 ? 1 : -1),
-                    radius: 1.7 + Math.random() * 1.5,
-                    color: palette[i % palette.length]
-                }});
-            }}
-
-            let animTime = 0;
-            let orbActive = true;
-
-            function renderOrb() {{
-                if (!orbActive) return;
-                ctx.clearRect(0, 0, size, size);
-                animTime += 0.03;
-
-                orbits.forEach((o, idx) => {{
-                    ctx.save();
-                    ctx.translate(cx, cy);
-                    ctx.rotate(o.tilt);
-                    ctx.beginPath();
-                    ctx.ellipse(0, 0, o.rx, o.ry, 0, 0, Math.PI * 2);
-                    ctx.strokeStyle = idx % 2 === 0 ? 'rgba(56, 189, 248, 0.16)' : 'rgba(16, 185, 129, 0.14)';
-                    ctx.lineWidth = 1.2;
-                    ctx.stroke();
-                    ctx.restore();
-                }});
-
-                const backParticles = [];
-                const frontParticles = [];
-
-                particles.forEach(p => {{
-                    p.angle += p.speed;
-                    const o = orbits[p.orbit];
-                    const ex = Math.cos(p.angle) * o.rx;
-                    const ey = Math.sin(p.angle) * o.ry;
-                    const cosT = Math.cos(o.tilt);
-                    const sinT = Math.sin(o.tilt);
-                    const px = cx + (ex * cosT - ey * sinT);
-                    const py = cy + (ex * sinT + ey * cosT);
-                    const depth = Math.sin(p.angle);
-                    const item = {{ p, px, py, depth }};
-                    if (depth < 0) backParticles.push(item);
-                    else frontParticles.push(item);
-                }});
-
-                backParticles.forEach(item => {{
-                    const {{ p, px, py, depth }} = item;
-                    ctx.save();
-                    ctx.globalAlpha = 0.25 + 0.35 * (depth + 1);
-                    ctx.fillStyle = p.color;
-                    ctx.beginPath();
-                    ctx.arc(px, py, p.radius * 0.8, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.restore();
-                }});
-
-                ctx.save();
-                const corePulse = Math.sin(animTime * 2.2) * 4;
-                const coreRadius = 24 + corePulse;
-
-                const outerGlow = ctx.createRadialGradient(cx, cy, 2, cx, cy, coreRadius * 1.8);
-                outerGlow.addColorStop(0, 'rgba(56, 189, 248, 0.8)');
-                outerGlow.addColorStop(0.4, 'rgba(16, 185, 129, 0.45)');
-                outerGlow.addColorStop(1, 'rgba(13, 17, 23, 0)');
-                ctx.fillStyle = outerGlow;
-                ctx.beginPath();
-                ctx.arc(cx, cy, coreRadius * 1.8, 0, Math.PI * 2);
-                ctx.fill();
-
-                const innerCore = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
-                innerCore.addColorStop(0, '#ffffff');
-                innerCore.addColorStop(0.3, '#7dd3fc');
-                innerCore.addColorStop(0.7, '#10b981');
-                innerCore.addColorStop(1, 'rgba(16, 185, 129, 0.1)');
-                ctx.fillStyle = innerCore;
-                ctx.shadowColor = '#38bdf8';
-                ctx.shadowBlur = 18;
-                ctx.beginPath();
-                ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.restore();
-
-                frontParticles.forEach(item => {{
-                    const {{ p, px, py, depth }} = item;
-                    ctx.save();
-                    ctx.globalAlpha = 0.65 + 0.35 * depth;
-                    ctx.fillStyle = p.color;
-                    ctx.shadowColor = p.color;
-                    ctx.shadowBlur = 10;
-                    ctx.beginPath();
-                    ctx.arc(px, py, p.radius * (1 + depth * 0.35), 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.restore();
-                }});
-
-                requestAnimationFrame(renderOrb);
-            }}
-
-            requestAnimationFrame(renderOrb);
-            window._stopSolvingOrb = function() {{ orbActive = false; }};
-        }}
-
-        initSolvingOrb();
-
-        // Background fetch for the deep dive content
-        const targetUrl = new URL(window.location.href);
-        targetUrl.searchParams.set('content', 'true');
-
-        fetch(targetUrl.toString(), {{
-            headers: {{ 'Accept': 'text/html' }}
-        }})
-        .then(async (resp) => {{
-            clearInterval(elapsedTimer);
-            if (!resp.ok) throw new Error('Failed to retrieve analysis: HTTP ' + resp.status);
-            const htmlContent = await resp.text();
-            if (window._stopSolvingOrb) window._stopSolvingOrb();
-            document.open();
-            document.write(htmlContent);
-            document.close();
-        }})
-        .catch((err) => {{
-            clearInterval(elapsedTimer);
-            document.getElementById('loading-view').style.display = 'none';
-            document.getElementById('error-view').style.display = 'block';
-            document.getElementById('error-message').innerText = err.message || 'Error retrieving deep dive analysis.';
-        }});
-    </script>
 </body>
 </html>
 """
@@ -3070,7 +2533,7 @@ def render_loading_html_page(
                 <span>Autonomous Remediation in Progress</span>
             </div>
             <h2>Remediating: {escaped_issue}</h2>
-            <div class="subtitle">CloudGuard SecOps AI Agent is synthesizing your fix and staging a pull request.</div>
+            <div class="subtitle">CloudGuard Gemini Remediation Agent is synthesising your fix and staging a pull request.</div>
 
             <div class="info-card">
                 <div class="info-row">
@@ -3093,7 +2556,7 @@ def render_loading_html_page(
                 <canvas id="solving-orb-canvas" width="220" height="220"></canvas>
                 <div class="orb-status-caption">
                     <span class="orb-status-dot"></span>
-                    <span id="orb-status-text">Synthesizing Security Remediation</span>
+                    <span id="orb-status-text">Synthesising Security Remediation</span>
                 </div>
             </div>
 
@@ -3101,7 +2564,7 @@ def render_loading_html_page(
                 <div id="progress-bar" class="progress-bar"></div>
             </div>
             <div class="status-indicator">
-                <span id="progress-status-text">Invoking Google ADK Remediation Agent (Autonomous Multi-Tool Pipeline)...</span>
+                <span id="progress-status-text">Invoking Gemini Remediation Agent...</span>
                 <span id="elapsed-time">Elapsed: 0s</span>
             </div>
 
@@ -3116,29 +2579,29 @@ def render_loading_html_page(
                 <div id="step-2" class="step-item active">
                     <div class="step-icon"><span class="step-spinner"></span></div>
                     <div class="step-content">
-                        <div class="step-title">2. Google ADK Agent Reasoning & Tool Execution</div>
-                        <div id="step-2-subtext" class="step-subtext">Autonomous agent reasoning over HCL, validating syntax, and invoking tools...</div>
+                        <div class="step-title">2. Gemini Remediation Agent Reasoning & HCL Synthesis</div>
+                        <div id="step-2-subtext" class="step-subtext">Gemini Agent reasoning over baseline HCL and synthesising least-privilege controls...</div>
                     </div>
                 </div>
                 <div id="step-3" class="step-item pending">
                     <div class="step-icon">3</div>
                     <div class="step-content">
-                        <div class="step-title">3. Tool: validate_terraform_code & GitOps Staging</div>
-                        <div id="step-3-subtext" class="step-subtext">Validating structural HCL compliance and syntax rules...</div>
+                        <div class="step-title">3. Terraform HCL Syntax & Compliance Validation</div>
+                        <div id="step-3-subtext" class="step-subtext">Validating structural HCL compliance and block balance...</div>
                     </div>
                 </div>
                 <div id="step-4" class="step-item pending">
                     <div class="step-icon">4</div>
                     <div class="step-content">
-                        <div class="step-title">4. Tool: create_github_pull_request_tool</div>
-                        <div id="step-4-subtext" class="step-subtext">Opening GitHub PR for human-in-the-loop review...</div>
+                        <div class="step-title">4. GitOps Branch Staging & GitHub Pull Request</div>
+                        <div id="step-4-subtext" class="step-subtext">Opening GitHub Pull Request for human-in-the-loop review...</div>
                     </div>
                 </div>
                 <div id="step-5" class="step-item pending">
                     <div class="step-icon">5</div>
                     <div class="step-content">
-                        <div class="step-title">5. Tools: record_remediation_audit & dispatch_google_chat_notification</div>
-                        <div id="step-5-subtext" class="step-subtext">Writing audit trail to Firestore & posting confirmation to Google Chat...</div>
+                        <div class="step-title">5. Concurrent Audit Trail & Google Chat Notification</div>
+                        <div id="step-5-subtext" class="step-subtext">Persisting Firestore audit record and posting confirmation card to Google Chat...</div>
                     </div>
                 </div>
             </div>
@@ -3272,23 +2735,23 @@ def render_loading_html_page(
         }}
 
         function startProgressAnimation() {{
-            setProgress(20, 'Invoking Vertex AI Gemini 2.5 Agent...');
+            setProgress(20, 'Invoking Gemini Remediation Agent...');
             
             progressTimer = setInterval(() => {{
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 if (elapsed >= 5 && elapsed < 12) {{
-                    setProgress(35, 'Vertex AI: Analyzing least-privilege security controls...');
-                    setStep(2, 'active', 'Synthesizing declarative Terraform HCL with zero-trust validation...');
+                    setProgress(35, 'Gemini Agent: Analysing least-privilege security controls...');
+                    setStep(2, 'active', 'Synthesising declarative Terraform HCL with zero-trust validation...');
                 }} else if (elapsed >= 12 && elapsed < 20) {{
-                    setProgress(55, 'Vertex AI: Generating compliant Terraform configuration...');
-                    setStep(2, 'active', 'Formulating architectural reasoning and verification instructions...');
+                    setProgress(55, 'Gemini Agent: Generating compliant Terraform configuration...');
+                    setStep(2, 'active', 'Formulating architectural rationale and risk impact statement...');
                 }} else if (elapsed >= 20 && elapsed < 27) {{
                     setProgress(75, 'GitOps: Staging Terraform configuration to branch...');
                     setStep(2, 'completed', 'Terraform HCL fix generated and validated.');
                     setStep(3, 'active', 'Creating GitOps branch and committing configuration file...');
                 }} else if (elapsed >= 27) {{
                     setProgress(90, 'GitHub: Opening Pull Request and notifying team...');
-                    setStep(3, 'completed', 'Code committed to dedicated remediations branch.');
+                    setStep(3, 'completed', 'Code committed to dedicated remediation branch.');
                     setStep(4, 'active', 'Submitting Pull Request via GitHub REST API...');
                 }}
             }}, 1500);
@@ -3580,11 +3043,15 @@ def render_loading_html_page(
                 document.getElementById('meta-branch-name').innerText = branchName;
                 document.getElementById('meta-file-path').innerText = filePath;
 
-                if (data.explanation) {{
+                if (data.explanation_html || data.explanation) {{
                     const expAcc = document.getElementById('accordion-explanation');
                     const expBody = document.getElementById('completed-explanation-body');
                     expAcc.style.display = 'block';
-                    expBody.innerText = data.explanation;
+                    if (data.explanation_html) {{
+                        expBody.innerHTML = data.explanation_html;
+                    }} else {{
+                        expBody.innerText = data.explanation;
+                    }}
                 }}
 
                 if (data.terraform_code) {{
@@ -3965,6 +3432,45 @@ def render_secops_dashboard_html() -> str:
             border-radius: 50%;
             background-color: var(--accent-green);
             display: inline-block;
+        }}
+        .scc-header-btn {{
+            background-color: rgba(88, 166, 255, 0.14);
+            border: 1px solid rgba(88, 166, 255, 0.45);
+            color: var(--accent-blue);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }}
+        .scc-header-btn:hover {{
+            background-color: rgba(88, 166, 255, 0.25);
+            border-color: var(--accent-blue);
+            color: #ffffff;
+        }}
+        .scc-drawer-btn {{
+            background-color: #21262d;
+            border: 1px solid var(--border-color);
+            color: var(--accent-blue);
+            padding: 7px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 12px;
+            transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }}
+        .scc-drawer-btn:hover {{
+            background-color: #30363d;
+            border-color: var(--accent-blue);
+            color: #ffffff;
         }}
         /* KPI Cards Grid */
         .kpi-grid {{
@@ -4357,6 +3863,7 @@ def render_secops_dashboard_html() -> str:
                 <div class="meta-pill"><span class="dot"></span> Project: <strong>{html.escape(PROJECT_ID)}</strong></div>
                 <div class="meta-pill">BigQuery Lake: <strong>{bq_badge}</strong></div>
                 <div class="meta-pill">State Machine: <strong>Firestore Connected</strong></div>
+                <a href="https://console.cloud.google.com/security/command-center/findings?project={html.escape(PROJECT_ID)}" target="_blank" rel="noopener noreferrer" class="scc-header-btn">↗️ Open SCC Console</a>
             </div>
         </header>
 
@@ -4473,6 +3980,9 @@ def render_secops_dashboard_html() -> str:
         <div style="margin-bottom: 20px; font-size: 13px;">
             <div style="margin-bottom: 6px;"><strong>Category:</strong> <span id="drawer-category"></span></div>
             <div><strong>Affected Resource:</strong> <span id="drawer-resource" style="font-family: monospace; color: #79c0ff; word-break: break-all;"></span></div>
+            <div>
+                <a id="drawer-scc-link" href="https://console.cloud.google.com/security/command-center/findings?project={html.escape(PROJECT_ID)}" target="_blank" rel="noopener noreferrer" class="scc-drawer-btn">↗️ View in SCC Console</a>
+            </div>
         </div>
 
         <div class="timeline">
@@ -4494,11 +4004,11 @@ def render_secops_dashboard_html() -> str:
                 <div class="timeline-dot">2</div>
                 <div class="timeline-content">
                     <div class="timeline-title">
-                        <span>Gemini AI Triage & Google Chat Alert</span>
+                        <span>Gemini Agent Triage & Google Chat Alert</span>
                         <span id="audit-stage2-time" class="timeline-time"></span>
                     </div>
-                    <div class="timeline-desc">Vertex AI analyzed finding context, generated 2 strategic options, and dispatched an interactive Card V2 alert.</div>
-                    <div class="timeline-meta-box">Model: {html.escape(VERTEX_MODEL)} &bull; Progressive Disclosure: Options 1 & 2</div>
+                    <div class="timeline-desc">Gemini Agent analysed finding context, generated 2 strategic options, and dispatched an interactive Card V2 alert.</div>
+                    <div class="timeline-meta-box">Agent: Gemini Triage Agent &bull; Progressive Disclosure: Options 1 &amp; 2</div>
                 </div>
             </div>
 
@@ -4520,10 +4030,10 @@ def render_secops_dashboard_html() -> str:
                 <div class="timeline-dot">4</div>
                 <div class="timeline-content">
                     <div class="timeline-title">
-                        <span>Autonomous ADK GitOps PR Created</span>
+                        <span>Autonomous Gemini GitOps PR Created</span>
                         <span id="audit-stage4-time" class="timeline-time"></span>
                     </div>
-                    <div class="timeline-desc">ADK agent validated Terraform HCL, staged an in-place baseline diff, and submitted a GitHub Pull Request.</div>
+                    <div class="timeline-desc">Gemini Remediation Agent validated Terraform HCL, staged an in-place baseline diff, and submitted a GitHub Pull Request.</div>
                     <div class="timeline-meta-box">
                         <div>Branch: <span id="audit-stage4-branch" style="color: #ffffff;">N/A</span></div>
                         <div>Target File: <span id="audit-stage4-file" style="color: #ffffff;">infrastructure/main.tf</span></div>
@@ -4563,6 +4073,16 @@ def render_secops_dashboard_html() -> str:
             document.getElementById('drawer-finding-id').innerText = finding.finding_id;
             document.getElementById('drawer-category').innerText = finding.issue_type;
             document.getElementById('drawer-resource').innerText = finding.resource_name;
+
+            const sccLinkElem = document.getElementById('drawer-scc-link');
+            if (sccLinkElem) {{
+                const projId = finding.project_id || '{html.escape(PROJECT_ID)}';
+                const extUri = (finding.raw_payload && finding.raw_payload.finding && finding.raw_payload.finding.externalUri) || '';
+                const sccUrl = (extUri && extUri.includes('project='))
+                    ? extUri
+                    : ('https://console.cloud.google.com/security/command-center/findings?project=' + encodeURIComponent(projId));
+                sccLinkElem.href = sccUrl;
+            }}
 
             // Stage 1
             document.getElementById('audit-stage1-time').innerText = finding.event_time ? finding.event_time.slice(0, 19) : 'Recorded';
@@ -4621,8 +4141,8 @@ def handle_chat_webhook(request):
     """
     Cloud Run webhook receiver that processes replies from Google Chat:
     1. If user indicates they do NOT want to act: logs decision, updates Firestore, and stops.
-    2. If user selects a fix option: invokes the Vertex AI agent to code the Terraform fix,
-       stages the code safely in Firestore, and does NOT apply it.
+    2. If user selects a fix option: invokes the Gemini Remediation Agent to code the Terraform fix,
+       stages the code on a GitHub Pull Request branch, and does NOT apply it.
     """
     try:
         return _handle_chat_webhook_impl(request)
@@ -4669,7 +4189,7 @@ def _handle_chat_webhook_impl(request):
                 "status": "healthy",
                 "service": "scc-remediation-receiver",
                 "project_id": PROJECT_ID,
-                "model": VERTEX_MODEL,
+                "agent": "Gemini Remediation Agent",
                 "dashboard_url": "/dashboard"
             }),
             200,
@@ -4766,21 +4286,6 @@ def _handle_chat_webhook_impl(request):
         receiver_url = os.environ.get("REMEDIATION_RECEIVER_URL", "")
         finding_severity = alert_data.get("severity", "HIGH")
         finding_project = alert_data.get("project_id") or PROJECT_ID
-
-        content_requested = (request.args.get("content") or "").lower() in ["true", "1", "yes"]
-
-        # Fast loading screen (<50ms) with Solving Orb for direct browser navigation
-        if wants_html and not content_requested:
-            return (
-                render_deep_dive_loading_page(
-                    finding_id=finding_key,
-                    issue_type=issue_type,
-                    resource_name=resource_name,
-                    severity=finding_severity
-                ),
-                200,
-                {"Content-Type": "text/html; charset=utf-8"}
-            )
 
         # Record viewing in Firestore without duplicate Google Chat notification
         try:
@@ -4954,7 +4459,8 @@ def _handle_chat_webhook_impl(request):
                     "pr_url": existing_pr_url,
                     "pr_number": existing_pr_num,
                     "terraform_code": existing_code,
-                    "explanation": existing_explanation
+                    "explanation": existing_explanation,
+                    "explanation_html": format_markdown_for_html(existing_explanation or "")
                 }),
                 200,
                 {"Content-Type": "application/json"}
@@ -5016,7 +4522,7 @@ def _handle_chat_webhook_impl(request):
 
             def worker():
                 try:
-                    logger.info(f"Worker thread running ADK agent for {finding_key}...")
+                    logger.info(f"Worker thread running Gemini Remediation Agent for {finding_key}...")
                     res = run_scc_remediation_agent(
                         alert_doc_ref=doc_ref,
                         alert_data=alert_data,
@@ -5036,6 +4542,7 @@ def _handle_chat_webhook_impl(request):
                         progress_callback=progress_callback
                     )
                     pr_r = res.get("pr_result") or {}
+                    exp_raw = res.get("explanation", "")
                     event_q.put({
                         "event": "complete",
                         "data": {
@@ -5050,7 +4557,8 @@ def _handle_chat_webhook_impl(request):
                             "file_path": pr_r.get("file_path"),
                             "applied_to_infrastructure": False,
                             "terraform_code": res.get("terraform_code", ""),
-                            "explanation": res.get("explanation", "")
+                            "explanation": exp_raw,
+                            "explanation_html": format_markdown_for_html(exp_raw)
                         }
                     })
                 except Exception as ex:
@@ -5069,9 +4577,9 @@ def _handle_chat_webhook_impl(request):
                     "event": "progress",
                     "step_num": 2,
                     "pct": 20,
-                    "status_text": "Invoking Google ADK Remediation Agent (Gemini 2.5)...",
-                    "step_text": "Synthesizing declarative Terraform HCL with zero-trust validation...",
-                    "orb_status": "Analyzing Security Policy"
+                    "status_text": "Invoking Gemini Remediation Agent...",
+                    "step_text": "Synthesising declarative Terraform HCL with zero-trust validation...",
+                    "orb_status": "Analysing Security Policy"
                 }
                 yield f"data: {json.dumps(initial_evt)}\n\n"
 
@@ -5097,7 +4605,7 @@ def _handle_chat_webhook_impl(request):
                 return Response(sse_event_stream(), headers=headers)
 
         logger.info(
-            f"Invoking Autonomous Google ADK Remediation Agent for finding '{finding_key}' "
+            f"Invoking Autonomous Gemini Remediation Agent for finding '{finding_key}' "
             f"using Option {target_num}: '{selected_option.get('title')}'"
         )
 
@@ -5180,7 +4688,8 @@ def _handle_chat_webhook_impl(request):
                 "pr_number": pr_number if pr_success else None,
                 "applied_to_infrastructure": False,
                 "terraform_code": tf_code,
-                "explanation": explanation
+                "explanation": explanation,
+                "explanation_html": format_markdown_for_html(explanation)
             }),
             200,
             {"Content-Type": "application/json"}

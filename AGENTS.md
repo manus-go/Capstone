@@ -9,9 +9,9 @@
   2. *Card V2 textParagraph widgets*: Use supported subset HTML (`<b>bold</b>`, `<i>italic</i>`, `<a href="...">text</a>`, and `• ` with `<br>` line breaks).
   3. *Deterministic Sanitization*: All automated messages and card paragraphs must pass through dedicated sanitizers (`format_google_chat_markdown` and `format_chat_card_html`) prior to dispatch to prevent raw asterisks from rendering.
 - **Minimalistic PR Confirmation Card (No External Logos)**: PR staging confirmations must use a clean, distraction-free Card V2 layout featuring key-value summary attributes, an interactive "Review PR #{pr_number} on GitHub →" text button, and a safety status badge. Do NOT include third-party logo images (specifically NO GitHub Octocat logo).
-- **Deep Dive Channel Separation**: When an operator clicks "Show More Details", the service must render exclusively the browser deep-dive inspection webpage. Redundant follow-up companion cards or notification bubbles in Google Chat must be completely suppressed.
-- **Progressive Disclosure in Chat**: The primary alert card must be scannable in 5 seconds (Severity, Category, parsed clean resource name, 1-sentence issue & risk summary, and 1-line Option summaries with `⭐ AI Recommended` on the preferred strategy). Detailed architectural justifications must be deferred to an in-chat follow-up Card V2 utilizing native collapsible sections (`collapsible: true`, `uncollapsibleWidgetsCount: 1`) or an interactive deep-dive inspector callback.
-- **Direct SCC Console Deep Link**: All finding alert cards must provide a direct URL link to the SCC Console findings dashboard (`https://console.cloud.google.com/security/command-center/findings?project={project_id}`).
+- **Deep Dive Channel Separation**: When an operator clicks "Show More Details", the service must render exclusively the browser deep-dive inspection webpage (`render_deep_dive_html_page`) immediately on the initial `GET` without a Solving Orb or intermediate loading page. Redundant follow-up companion cards or notification bubbles in Google Chat must be completely suppressed.
+- **Progressive Disclosure in Chat**: The primary alert card must use a clean, logo-free Card V2 layout scannable in 5 seconds (`TARGET <ASSET_TYPE>` `decoratedText`, Category, 1-sentence Issue & Risk summary, and 3-line Option summaries featuring `⭐ Recommended` on the preferred strategy and a single condensed colour-coded `<font color="#2da44e"><b>Pro:</b></font> ... • <font color="#cf222e"><b>Con:</b></font> ...` line without `+`/`-` prefixes). Detailed architectural justifications must be deferred to the instant "Show More Details" deep-dive inspection webpage.
+- **Direct SCC Console Deep Link**: All finding alert cards, the SecOps Command Dashboard header (`↗️ Open SCC Console`), and the slide-out Finding Lifecycle Audit Drawer (`↗️ View in SCC Console`) must provide direct URL links to the SCC Console findings dashboard (`https://console.cloud.google.com/security/command-center/findings?project={project_id}`).
 
 ## 2. Infrastructure as Code (IaC) & Remediation Policy
 - **Strictly Terraform**: All automated and suggested remediation options must be declarative Terraform (HCL) changes (e.g., resource arguments, IAM member bindings, encryption settings). Never suggest or generate Google Cloud Console steps or imperative `gcloud` CLI commands.
@@ -42,15 +42,15 @@
 - **Ephemeral Validation for Complex Batches**: For batch updates containing tables or dense formatting, always validate the batch execution against an ephemeral scratch document before modifying live design documents.
 
 ## 6. Two-Phase Browser Webhook & Staging UI Invariants
-- **Sub-50ms Initial Response**: When an operator navigates to or clicks a Cloud Run webhook receiver from a browser (`GET` with `text/html` accept header), the service must immediately return a lightweight interactive loading page (`< 50ms`) rather than blocking the HTTP connection during agent reasoning.
-- **Solving Orb Canvas Engine & SSE Streaming**: Staging screens and agent cognitive wait states must render the 2D canvas **Solving Orb** particle field configured with CloudGuard's palette:
+- **Sub-50ms Initial Response for Live Remediation**: When an operator triggers a live remediation action (`Fix via Option 1 / 2`, `intent == "REMEDIATE"`) from a browser (`GET` with `text/html` accept header), the service must immediately return a lightweight interactive loading page (`< 50ms`) rather than blocking the HTTP connection during agent reasoning. Conversely, read-only deep-dive views (`Show More Details`, `intent == "SHOW_DETAILS"`) must render directly on the initial `GET` without any intermediate loading screen or Solving Orb.
+- **Solving Orb Canvas Engine & SSE Streaming**: Live remediation staging screens (`REMEDIATE`) and agent cognitive wait states must render the 2D canvas **Solving Orb** particle field configured with CloudGuard's palette:
   - *Orbital trails*: Electric Blue (`#38bdf8` / `rgba(56, 189, 248, 0.85)`)
   - *Harmonic core*: Emerald Green (`#10b981` / `rgba(16, 185, 129, 0.90)`)
   - *Ambient glow*: Dark Slate / Indigo (`rgba(14, 165, 233, 0.15)`)
 - **Server-Sent Events (SSE) Progress**: Multi-step remediation pipelines must stream milestone events (`text/event-stream`) to dynamically update orb status text and pipeline step indicators without page reloads.
-- **Concurrent Post-PR I/O**: After opening a GitHub PR, non-dependent persistence (Firestore audit) and external notifications (Google Chat) must execute concurrently via a thread pool to minimize operator wait time.
+- **Concurrent Post-PR I/O**: Inside `create_github_pull_request_tool`, immediately after opening a GitHub PR, non-dependent persistence (Firestore audit including `explanation`) and external notifications (Google Chat) must execute concurrently via a thread pool to minimize operator wait time and eliminate redundant post-PR LLM tool turns.
 - **Client-Side Background Execution**: The loading UI must trigger the actual agent execution via asynchronous background `fetch(...?action=execute)` while rendering an animated progress bar and pipeline step checklist.
-- **Review Dashboard Completeness**: Upon completion, the UI must display the GitHub PR link, committed branch, target file, architectural rationale, and a read-only HCL code viewer tagged with `Safely Staged • NOT Applied`.
+- **Review Dashboard Completeness**: Upon completion, the UI must display the GitHub PR link, committed branch, target file, formatted HTML architectural rationale (`explanation_html`), and a read-only HCL code viewer tagged with `Safely Staged • NOT Applied`.
 - **Progressive Disclosure via Accordions**: Completed remediation screens must eliminate walls of text. Heavy technical details must be organized into clean collapsible `<details class="accordion">` components:
   1. 💡 *Architectural Reasoning & Trade-Offs*
   2. 🛡️ *Compliance & Workload Blast Radius Analysis*
@@ -58,13 +58,11 @@
 - **Reversible Presentation Layer Architecture**: When testing significant UI restyling or experimental interfaces, decouple the UI into dedicated presentation modules and keep core handler logic, state machines, and API contracts pristine. Implement dual-mode reversibility (e.g. query parameter `?ui=classic`, session cookies, or an environment flag `USE_AVIONICS_UI`) and maintain a zero-friction single-command rollback path (`git checkout <entrypoint> && rm <presentation_module>`) to ensure instantaneous, regression-free reversion to the baseline UI upon request.
 
 ## 7. Autonomous ADK Multi-Tool GitOps Execution Order
-- **Sequential Tool Chain**: Autonomous ADK remediation agents must enforce a strict 6-step operational pipeline:
+- **Sequential Tool Chain**: Autonomous Gemini remediation agents must enforce a streamlined 4-step operational pipeline:
   1. Fetch existing baseline Terraform code and commit blob SHA from GitHub (`infrastructure/main.tf`).
   2. Generate complete declarative Terraform code refactoring the baseline in-place with inline remediation comments.
   3. Invoke `validate_terraform_code` to verify syntax, required HCL blocks, and brace matching.
-  4. Invoke `create_github_pull_request_tool` specifying `existing_file_sha` to stage a true red/green diff on a dedicated branch.
-  5. Invoke `record_remediation_audit` to persist audit records in `alerts/` and `remediations/`.
-  6. Invoke `dispatch_google_chat_notification` to broadcast PR details without raw code to Google Chat.
+  4. Invoke `create_github_pull_request_tool` specifying `existing_file_sha` and explicit 4-part PR arguments (`what_is_causing_issue`, `security_risk_impact`, `recommended_fix_summary`, `architectural_rationale`) to stage a true red/green diff on a dedicated branch and concurrently trigger `record_remediation_audit` and `dispatch_google_chat_notification`.
 - **Pre-Execution Idempotency Gate**: Webhook handlers must check `alert_data["remediation_status"] == "PR_OPENED"` and `existing_pr_url` prior to initializing the ADK runner, immediately returning the existing PR to avoid duplicate branches, commits, or notifications.
 
 ## 8. Security Finding Simulation & Test Harness Invariants
@@ -87,11 +85,11 @@
 - **Domain-Specific KPI Data Sourcing**: SecOps dashboards must partition metrics by their native operational strengths:
   1. **Immutable Ingestion Telemetry (BigQuery)**: BigQuery (`secops_lake.scc_findings_raw`) is the authoritative source for total ingested event volume, long-term multi-day telemetry, and raw finding distribution by severity.
   2. **Real-Time Lifecycle State (Cloud Firestore)**: Firestore (`alerts` and `remediations`) is the authoritative source for low-latency point lookups, operational workflow states (`NOTIFIED`, `PR_OPENED`, `DISMISSED_NO_ACTION`), and Mean Time to Remediation (MTTR) tracking.
-- **4-Stage Lifecycle Audit Trail**: Finding audit records must track and display 4 sequential lifecycle stages with exact UTC timestamps:
+- **4-Stage Lifecycle Audit Trail**: Finding audit records must track and display 4 sequential lifecycle stages with exact UTC timestamps (referring to the AI layer cleanly as a Gemini Agent without exposing raw model IDs in UI badges):
   1. *SCC Ingestion & Event Detection*
-  2. *Gemini Vertex AI Triage & Google Chat Dispatch*
+  2. *Gemini Agent Triage & Google Chat Dispatch*
   3. *Operator Decision & Action Chosen*
-  4. *Autonomous ADK GitOps Execution & PR Creation*
+  4. *Autonomous Gemini GitOps Execution & PR Creation*
 - **DOM Entity Hygiene**: Dynamic JavaScript DOM updates must never inject raw HTML character entities (such as `&rarr;`) through `.innerText` or `.textContent`. Always use literal unicode glyphs (`→`) or assign via `.innerHTML`.
 - **Fixed-Grid Actions Column Alignment**: Table actions containing conditional elements (e.g., `Review PR` and `📋 Audit Trail`) must enforce a fixed-column layout (such as a 2-column CSS Grid `140px 120px` with fixed slot widths). Even when findings do not have an open PR, slot 1 must maintain its width so that all `📋 Audit Trail` buttons in slot 2 remain strictly vertically aligned across all table rows.
 

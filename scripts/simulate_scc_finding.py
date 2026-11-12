@@ -469,7 +469,7 @@ def main():
         )
         print(f"\n{BOLD}Pipeline Action Triggered (Instant Pub/Sub Mode):{RESET}")
         print(f"1. Pub/Sub notification delivered to 'scc-alert-router' Cloud Function.")
-        print(f"2. Gemini Vertex AI will triage the misconfiguration and evaluate risk.")
+        print(f"2. The Gemini Triage Agent will analyse the misconfiguration and evaluate risk.")
         print(f"3. An interactive Card V2 alert will arrive in Google Chat with progressive disclosure.")
         print(f"4. View telemetry and real-time lifecycle tracking in the SecOps Command Dashboard at /dashboard.")
         print(f"\nWhen resolved, run:\n  python3 scripts/simulate_scc_finding.py --project {args.project} --finding-id {args.finding_id} --mute")

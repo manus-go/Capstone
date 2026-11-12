@@ -1,6 +1,6 @@
 # CloudGuard: AI-Powered SecOps & GitOps Automation Pipeline
 
-CloudGuard is an automated SecOps and GitOps remediation platform on Google Cloud. It streams Security Command Center (SCC) findings into Pub/Sub, triages alerts using Gemini models on Vertex AI, notifies security teams via Google Chat Card V2, and automates declarative Terraform remediations via GitHub Pull Requests.
+CloudGuard is an automated SecOps and GitOps remediation platform on Google Cloud. It streams Security Command Center (SCC) findings into Pub/Sub, triages alerts using autonomous Gemini agents, notifies security teams via Google Chat Card V2, and automates declarative Terraform remediations via GitHub Pull Requests.
 
 ---
 
@@ -56,8 +56,8 @@ CloudGuard is an automated SecOps and GitOps remediation platform on Google Clou
 
 - [`terraform-foundation/`](./terraform-foundation/): Terraform HCL configs for SCC export, Pub/Sub, BigQuery lake, Firestore, Cloud Functions, and Cloud Run receivers. See [Terraform README](./terraform-foundation/README.md).
 - [`functions/`](./functions/):
-  - `scc-alert-router`: Cloud Function evaluating alerts, invoking Vertex AI, and posting Google Chat cards.
-  - `scc-remediation-receiver`: Cloud Run service generating declarative Terraform fixes and opening GitHub PRs.
+  - `scc-alert-router`: Cloud Function evaluating alerts, invoking the Gemini Triage Agent, and posting Google Chat cards.
+  - `scc-remediation-receiver`: Cloud Run service running the Gemini Remediation Agent to generate declarative Terraform fixes and open GitHub PRs.
 - [`scripts/`](./scripts/): Finding generation and test scripts (including Public Bucket ACL simulation). See [Scripts README](./scripts/README.md).
 - [`tests/`](./tests/): End-to-end integration and interactive test runners (`e2e_test.py`, `interactive_session.py`).
 - [`AGENTS.md`](./AGENTS.md): Workspace policies and invariants for autonomous ADK agents, Google Chat payloads, and GitOps standards.

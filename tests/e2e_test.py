@@ -5,9 +5,9 @@ End-to-End (E2E) Test Suite for CloudGuard SecOps Automation Pipeline
 Flow Verified:
 1. Ingestion: Publish SCC High/Critical Finding to Pub/Sub ('scc-high-alerts-topic')
 2. BigQuery Ingestion: Verify Pub/Sub streaming into BigQuery secops_lake
-3. AI Triage: Cloud Function 'scc-alert-router' analyzes via Vertex AI & posts Card V2 to Google Chat
+3. AI Triage: Cloud Function 'scc-alert-router' analyzes via the Gemini Triage Agent & posts Card V2 to Google Chat
 4. Firestore Staging: Enriched alert saved in 'alerts' collection with AI fix options
-5. Automated Remediation: Call 'scc-remediation-receiver' to code fix via Vertex AI
+5. Automated Remediation: Call 'scc-remediation-receiver' to code fix via the Gemini Remediation Agent
 6. GitOps Automation: Verify branch creation & PR opened on GitHub (manus-go/Capstone)
 7. Google Chat Notification: Verify PR notification sent (WITHOUT Terraform code in chat)
 8. Idempotency Check: Verify re-invoking receiver prevents duplicate PRs & duplicate messages
@@ -183,9 +183,9 @@ def run_e2e_test():
     # -------------------------------------------------------------------------
     # Step 3: Wait & Verify Cloud Function 'scc-alert-router' & Firestore Storage
     # -------------------------------------------------------------------------
-    log_step(3, "Verifying Eventarc Ingestion, Vertex AI Triage & Google Chat Dispatch")
+    log_step(3, "Verifying Eventarc Ingestion, Gemini Triage Agent & Google Chat Dispatch")
     log_info(f"Target Firestore Document: alerts/{expected_doc_id}")
-    log_info("Waiting for Cloud Function 'scc-alert-router' to process and invoke Vertex AI...")
+    log_info("Waiting for Cloud Function 'scc-alert-router' to process and invoke the Gemini Triage Agent...")
 
     firestore_url = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/alerts/{expected_doc_id}"
     alert_doc = None
@@ -218,13 +218,13 @@ def run_e2e_test():
     log_pass(f"Issue Type: {BOLD}{issue_type_field}{RESET}")
 
     if fix_options:
-        log_pass(f"Vertex AI generated {len(fix_options)} remediation options:")
+        log_pass(f"Gemini Triage Agent generated {len(fix_options)} remediation options:")
         for idx, opt in enumerate(fix_options, 1):
             opt_fields = opt.get("mapValue", {}).get("fields", {})
             title = opt_fields.get("title", {}).get("stringValue", "Option")
             log_info(f"Option {idx}: {title}")
     else:
-        log_fail("Vertex AI fix options missing in alert document.")
+        log_fail("Gemini Triage Agent fix options missing in alert document.")
 
     if chat_status == "SUCCESS":
         log_pass("Google Chat Card V2 notification successfully dispatched to user space!")
@@ -311,9 +311,9 @@ def run_e2e_test():
     print(f"{BOLD}═════════════════════════════════════════════════════════════════{RESET}")
     print(f"1. Pub/Sub Message Ingestion:      {GREEN}PASS{RESET}")
     print(f"2. Alert Router & Eventarc Trigger: {GREEN}PASS{RESET}")
-    print(f"3. Vertex AI Multi-Option Triage:   {GREEN}PASS{RESET}")
+    print(f"3. Gemini Agent Multi-Option Triage:{GREEN}PASS{RESET}")
     print(f"4. Google Chat Card V2 Alert:       {GREEN}PASS{RESET}")
-    print(f"5. Vertex AI Terraform HCL Coding:  {GREEN}PASS{RESET}")
+    print(f"5. Gemini Agent Terraform HCL Fix:  {GREEN}PASS{RESET}")
     print(f"6. GitHub Branch & Pull Request:    {pr_result_str}")
     print(f"7. Google Chat PR Notification:     {GREEN}PASS{RESET} (Code stripped)")
     print(f"8. Idempotency & Duplicate Guard:   {idem_result_str}")
