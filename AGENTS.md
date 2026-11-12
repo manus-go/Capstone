@@ -95,3 +95,11 @@
 
 ## 10. Workspace Customization & Git Synchronization
 - **Custom Skill & Rule Persistence**: All workspace customizations (skills in `.agents/skills/<name>/SKILL.md` and rules in `AGENTS.md` / `.agents/rules/`) are canonical project assets. When adding, refining, or archiving workspace skills, ensure they are committed and pushed to the upstream Git repository so they persist across agent sessions and team workstations.
+
+## 11. Model Presentation vs Internal Configuration Invariants
+- **User-Facing Agent Identity**: In all user-facing interfaces (Google Chat cards, deep dive webpages, SecOps Command Dashboard, logs, and documentation), refer to AI capabilities by their operational roles (e.g., `Gemini Triage Agent`, `Gemini Remediation Agent`) rather than platform vendor names or specific model versions (e.g., avoid "Vertex AI", "Gemini 2.5 Flash").
+- **Audit Badge Hygiene**: Stage 2 and 4 audit drawer badges must display operational identities (e.g., `Agent: Gemini Triage Agent • Progressive Disclosure: Options 1 & 2`) without exposing raw underlying model identifiers or timestamps in place of status.
+- **Internal Configuration Immutability**: NEVER rename internal configuration variables, environment variables, or Terraform parameters (such as `VERTEX_AI_MODEL`, `VERTEX_AI_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI="TRUE"`, or `vertex_ai_model`) simply to match user-facing naming preferences. Modifying internal identifiers introduces unnecessary risk of altering IAM authentication, API routing, or breaking existing Terraform state.
+
+## 12. Agile Remediation in Phased Implementations
+- **Immediate Defect Resolution**: When executing a phased implementation plan, if an operator observes and reports an active defect, regression, or visual inconsistency (e.g., lingering symbol prefixes or unexpected wait states), the agent must immediately evaluate whether the issue is addressable on the spot or should be pulled forward from a later phase. Address and verify the fix immediately before proceeding with subsequent scheduled phases.
