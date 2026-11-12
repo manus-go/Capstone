@@ -46,13 +46,9 @@ resource "google_storage_bucket" "compliant_analytics_data" {
 resource "google_storage_bucket" "vulnerable_public_data" {
   name                        = "${var.project_id}-demo-public-bucket"
   location                    = var.region
-  uniform_bucket_level_access = false
+  # Remediation: Enforce Uniform Bucket-Level Access to disable object ACLs
+  uniform_bucket_level_access = true
   force_destroy               = true
 }
 
-# Vulnerable ACL binding exposing the bucket to the entire internet
-resource "google_storage_bucket_access_control" "public_bucket_acl" {
-  bucket = google_storage_bucket.vulnerable_public_data.name
-  role   = "READER"
-  entity = "allUsers"
-}
+# Remediation: Remove public ACL binding as Uniform Bucket-Level Access is enabled
