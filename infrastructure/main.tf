@@ -41,18 +41,13 @@ resource "google_storage_bucket" "compliant_analytics_data" {
   }
 }
 
-# Vulnerable Storage Bucket: Triggering SCC detector PUBLIC_BUCKET_ACL
-# Notice: uniform_bucket_level_access is false, allowing legacy ACLs.
+# Remediation: Enforcing uniform bucket-level access to eliminate object ACLs and centralize permissions via IAM.
 resource "google_storage_bucket" "vulnerable_public_data" {
   name                        = "${var.project_id}-demo-public-bucket"
   location                    = var.region
-  uniform_bucket_level_access = false
+  uniform_bucket_level_access = true # Remediation: Set to true to enforce uniform bucket-level access
   force_destroy               = true
 }
 
-# Vulnerable ACL binding exposing the bucket to the entire internet
-resource "google_storage_bucket_access_control" "public_bucket_acl" {
-  bucket = google_storage_bucket.vulnerable_public_data.name
-  role   = "READER"
-  entity = "allUsers"
-}
+# Remediation: Removed the vulnerable ACL binding that exposed the bucket to the internet.
+# This resource is no longer needed as uniform_bucket_level_access is enforced.
